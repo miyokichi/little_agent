@@ -1,0 +1,25 @@
+[project]
+name = "little-agent"
+version = "0.1.0"
+description = "A small Windows-friendly Python AI agent system with tools and skills."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+little-agent = "little_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["little_agent*"]
+exclude = ["skills*", "tests*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
