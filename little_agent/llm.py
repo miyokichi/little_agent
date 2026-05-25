@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from uuid import uuid4
 from typing import Any
 
 from little_agent.messages import Message
@@ -44,6 +45,7 @@ class OpenAICompatibleChatClient(LLMClient):
         return {
             "content": choice.get("content") or "",
             "tool_calls": self._tool_calls(choice),
+            "usage": response.get("usage") or {},
         }
 
     def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -80,6 +82,10 @@ class OpenAICompatibleChatClient(LLMClient):
         item: dict[str, Any] = {"role": message.role, "content": message.content}
         if message.name:
             item["name"] = message.name
+        if message.role == "tool" and message.tool_call_id:
+            item["tool_call_id"] = message.tool_call_id
+        if message.tool_calls:
+            item["tool_calls"] = [_openai_tool_call(call) for call in message.tool_calls]
         return item
 
     @staticmethod
@@ -89,7 +95,7 @@ class OpenAICompatibleChatClient(LLMClient):
             function = call.get("function") or {}
             calls.append(
                 {
-                    "id": call.get("id"),
+                    "id": call.get("id") or f"call_{uuid4().hex[:12]}",
                     "name": function.get("name", ""),
                     "arguments": _json_object(function.get("arguments") or "{}"),
                 }
@@ -99,7 +105,7 @@ class OpenAICompatibleChatClient(LLMClient):
         if legacy_call:
             calls.append(
                 {
-                    "id": None,
+                    "id": f"call_{uuid4().hex[:12]}",
                     "name": legacy_call.get("name", ""),
                     "arguments": _json_object(legacy_call.get("arguments") or "{}"),
                 }
@@ -116,20 +122,25 @@ class LocalRuleClient(LLMClient):
         messages: list[Message],
         tools: ToolRegistry,
     ) -> dict[str, Any]:
+        tool_messages = [message for message in messages if message.role == "tool"]
+        if tool_messages:
+            return {"content": tool_messages[-1].content, "tool_calls": [], "usage": {}}
+
         text = next((message.content for message in reversed(messages) if message.role == "user"), "")
         lowered = text.lower()
         if "time" in lowered or "date" in lowered:
-            return {"content": "", "tool_calls": [{"name": "get_datetime", "arguments": {}}]}
+            return {"content": "", "tool_calls": [{"name": "get_datetime", "arguments": {}}], "usage": {}}
         if "task" in lowered or "todo" in lowered:
-            return {"content": "", "tool_calls": [{"name": "list_tasks", "arguments": {"status": "open"}}]}
+            return {"content": "", "tool_calls": [{"name": "list_tasks", "arguments": {"status": "open"}}], "usage": {}}
         if "list" in lowered or "ls" in lowered:
-            return {"content": "", "tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}]}
+            return {"content": "", "tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}], "usage": {}}
         return {
             "content": (
                 "OPENAI_API_KEY is not configured, so I am running in local fallback mode. "
                 "I can still handle simple requests like date/time or listing the workspace."
             ),
             "tool_calls": [],
+            "usage": {},
         }
 
 
@@ -139,3 +150,17 @@ def _json_object(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _openai_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    arguments = call.get("arguments") or {}
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    return {
+        "id": call.get("id") or f"call_{uuid4().hex[:12]}",
+        "type": "function",
+        "function": {
+            "name": str(call.get("name") or ""),
+            "arguments": arguments,
+        },
+    }

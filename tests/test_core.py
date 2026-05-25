@@ -1,4 +1,5 @@
 from contextlib import suppress
+import json
 import unittest
 from pathlib import Path
 
@@ -57,6 +58,21 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(payload, {"role": "user", "content": "hello"})
 
+    def test_openai_compatible_client_payload_shape_for_tool_loop(self) -> None:
+        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
+        assistant = Message(
+            role="assistant",
+            content="",
+            tool_calls=[{"id": "call_1", "name": "get_datetime", "arguments": {}}],
+        )
+        tool = Message(role="tool", content="OK: today", tool_call_id="call_1")
+
+        assistant_payload = client._message_payload(assistant)
+        tool_payload = client._message_payload(tool)
+
+        self.assertEqual(assistant_payload["tool_calls"][0]["function"]["name"], "get_datetime")
+        self.assertEqual(tool_payload["tool_call_id"], "call_1")
+
     def test_openai_compatible_client_parses_tool_calls(self) -> None:
         calls = OpenAICompatibleChatClient._tool_calls(
             {
@@ -73,6 +89,78 @@ class CoreTests(unittest.TestCase):
         )
 
         self.assertEqual(calls, [{"id": "call_1", "name": "get_datetime", "arguments": {}}])
+
+    def test_agent_returns_tool_result_to_llm_for_final_answer(self) -> None:
+        class TwoStepLLM:
+            def __init__(self) -> None:
+                self.calls: list[list[Message]] = []
+
+            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
+                self.calls.append([*messages])
+                if len(self.calls) == 1:
+                    return {
+                        "content": "",
+                        "tool_calls": [{"id": "call_1", "name": "get_datetime", "arguments": {}}],
+                    }
+                tool_messages = [message for message in messages if message.role == "tool"]
+                return {"content": f"Final answer based on {tool_messages[-1].content}", "tool_calls": []}
+
+        config = AgentConfig(
+            model="local",
+            workspace=Path.cwd().resolve(),
+            require_confirmation=True,
+            openai_api_key=None,
+            openai_base_url="https://api.openai.com/v1",
+        )
+        llm = TwoStepLLM()
+        agent = Agent(config, SkillLoader(Path("skills").resolve()), llm=llm)  # type: ignore[arg-type]
+
+        answer = agent.run("date")
+
+        self.assertIn("Final answer based on [get_datetime]", answer)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertTrue(any(message.role == "tool" for message in llm.calls[1]))
+
+    def test_agent_logs_conversation_tools_and_usage(self) -> None:
+        workspace = (Path.cwd() / ".test-log-workspace").resolve()
+        log_dir = workspace / "logs"
+        config = AgentConfig(
+            model="local",
+            workspace=workspace,
+            require_confirmation=True,
+            openai_api_key=None,
+            openai_base_url="https://api.openai.com/v1",
+            enable_logging=True,
+            log_dir=log_dir,
+        )
+        agent = Agent(config, SkillLoader(Path("skills").resolve()))
+
+        try:
+            answer = agent.run("date")
+            assert agent.logger is not None
+            session_id = agent.logger.session_id
+            conversation_log = log_dir / "conversations" / f"{session_id}.jsonl"
+            tool_log = log_dir / "tools" / f"{session_id}.jsonl"
+            usage_log = log_dir / "usage" / f"{session_id}.jsonl"
+            conversation_events = [json.loads(line)["event"] for line in conversation_log.read_text().splitlines()]
+            tool_events = [json.loads(line)["event"] for line in tool_log.read_text().splitlines()]
+            usage_records = [json.loads(line) for line in usage_log.read_text().splitlines()]
+        finally:
+            for path in (log_dir / "conversations").glob("*.jsonl"):
+                path.unlink(missing_ok=True)
+            for path in (log_dir / "tools").glob("*.jsonl"):
+                path.unlink(missing_ok=True)
+            for path in (log_dir / "usage").glob("*.jsonl"):
+                path.unlink(missing_ok=True)
+            for path in [log_dir / "conversations", log_dir / "tools", log_dir / "usage", log_dir, workspace]:
+                with suppress(OSError):
+                    path.rmdir()
+
+        self.assertIn("[get_datetime]", answer)
+        self.assertIn("user_message", conversation_events)
+        self.assertIn("final_answer", conversation_events)
+        self.assertIn("tool_result", tool_events)
+        self.assertGreaterEqual(usage_records[-1]["totals"]["total_tokens"], 1)
 
     def test_skill_loader_reads_task_manager_script_tools(self) -> None:
         tools = SkillLoader(Path("skills").resolve()).load_tools()

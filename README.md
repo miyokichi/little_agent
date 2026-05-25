@@ -47,7 +47,24 @@ Agentは以下を行います。
 - 入力に関連しそうなAgent Skillを読み込む
 - LLMにsystem prompt、会話履歴、Tool定義を渡す
 - LLMが要求したToolを実行する
-- Tool結果をユーザーに返す
+- Tool結果を `tool` メッセージとしてLLMへ戻す
+- LLMが追加Toolを要求する場合は、最大ステップ数まで繰り返す
+- 最終回答をユーザーに返す
+
+### Multi-step Tool Loop
+
+Agentは1ターン内で以下のループを実行します。
+
+```text
+user input
+  -> LLM
+  -> tool_calls
+  -> Tool実行
+  -> tool resultをLLMへ返す
+  -> final answer または次のtool_calls
+```
+
+最大Toolステップ数は `LITTLE_AGENT_MAX_TOOL_STEPS` で設定します。デフォルトは `5` です。
 
 ### Tool仕様
 
@@ -197,6 +214,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 LITTLE_AGENT_MODEL=gpt-4.1-mini
 LITTLE_AGENT_WORKSPACE=.
 LITTLE_AGENT_REQUIRE_CONFIRMATION=true
+LITTLE_AGENT_MAX_TOOL_STEPS=5
+LITTLE_AGENT_ENABLE_LOGGING=true
+LITTLE_AGENT_LOG_DIR=logs
 ```
 
 ## 起動
@@ -231,6 +251,27 @@ little-agent
 ```
 
 `write_file` と `run_powershell` は実行前に確認プロンプトが出ます。
+
+### ログとToken集計
+
+通常起動では `LITTLE_AGENT_ENABLE_LOGGING=true` により、セッション単位のJSONLログを保存します。
+
+保存先:
+
+```text
+logs/
+  conversations/<session_id>.jsonl
+  tools/<session_id>.jsonl
+  usage/<session_id>.jsonl
+```
+
+記録内容:
+
+- `conversations`: ユーザー入力、LLM応答、最終回答、LLMエラー
+- `tools`: Tool名、引数、実行結果、キャンセル、エラー
+- `usage`: LLM呼び出しごとのtoken使用量と累計
+
+token数は、OpenAI互換APIが `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` を返す場合はその値を記録します。`usage` が返らない互換APIやローカルフォールバックでは、文字数から概算した値を `estimated: true` として記録します。
 
 ### Skill作成支援
 
@@ -296,7 +337,7 @@ python -m pytest -q
 
 ## 現在の制限
 
-- LLMのTool実行結果を再度LLMに渡して最終回答を生成するループはまだ最小構成です
+- Tool実行後にLLMへ戻すmulti-step loopは最小構成です
 - PowerShell安全ガードは簡易的です
 - 長期記憶は未実装です
 - 複数エージェントの協調は未実装です

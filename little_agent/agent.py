@@ -5,7 +5,9 @@ from typing import Any
 
 from little_agent.config import AgentConfig
 from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
+from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory import ConversationMemory
+from little_agent.messages import Message
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
@@ -32,8 +34,11 @@ class Agent:
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
         self.memory = ConversationMemory()
+        self.logger = RunLogger(config.log_dir or (config.workspace / "logs")) if config.enable_logging else None
 
     def run(self, user_text: str) -> str:
+        if self.logger:
+            self.logger.log_conversation("user_message", content=user_text)
         selected_skills = self.skills.select_for_text(user_text)
         system_prompt = self._system_prompt(selected_skills)
         messages = [*self.memory.messages]
@@ -43,29 +48,80 @@ class Agent:
             messages[0] = system_prompt
         messages.append(type(system_prompt)(role="user", content=user_text))
 
-        try:
-            response = self.llm.complete(self.config.model, messages, self.tools)
-        except RuntimeError as exc:
-            return f"LLM request failed: {exc}"
-        tool_outputs = []
-        for call in response.get("tool_calls", []):
-            output = self._run_tool(call["name"], call.get("arguments", {}))
-            tool_outputs.append(f"[{call['name']}]\n{output}")
+        final = ""
+        for _step in range(max(self.config.max_tool_steps, 1)):
+            try:
+                response = self.llm.complete(self.config.model, messages, self.tools)
+            except RuntimeError as exc:
+                if self.logger:
+                    self.logger.log_conversation("llm_error", error=str(exc))
+                return f"LLM request failed: {exc}"
 
-        final = response.get("content", "").strip()
-        if tool_outputs:
-            final = "\n\n".join([part for part in [final, *tool_outputs] if part])
+            tool_calls = self._normalize_tool_calls(response.get("tool_calls", []))
+            content = response.get("content", "").strip()
+            if self.logger:
+                self.logger.log_conversation(
+                    "assistant_message",
+                    content=content,
+                    tool_calls=tool_calls,
+                    step=_step + 1,
+                )
+                self.logger.log_usage(
+                    "llm_usage",
+                    self._usage(response, messages, content, tool_calls),
+                    model=self.config.model,
+                    step=_step + 1,
+                )
+            if not tool_calls:
+                final = content
+                break
+
+            messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+            for call in tool_calls:
+                output = self._run_tool(call["name"], call.get("arguments", {}))
+                messages.append(
+                    Message(
+                        role="tool",
+                        content=f"[{call['name']}]\n{output}",
+                        tool_call_id=call["id"],
+                    )
+                )
+        else:
+            final = f"Stopped after {self.config.max_tool_steps} tool step(s)."
+
+        if not final:
+            final = "(no response)"
 
         self.memory.add("user", user_text)
         self.memory.add("assistant", final)
+        if self.logger:
+            self.logger.log_conversation("final_answer", content=final)
         return final
+
+    @staticmethod
+    def _normalize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized = []
+        for index, call in enumerate(tool_calls, start=1):
+            arguments = call.get("arguments") or {}
+            normalized.append(
+                {
+                    "id": str(call.get("id") or f"call_{index}"),
+                    "name": str(call.get("name") or ""),
+                    "arguments": arguments if isinstance(arguments, dict) else {},
+                }
+            )
+        return [call for call in normalized if call["name"]]
 
     def _run_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if name not in self.tools.names():
+            if self.logger:
+                self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
             return f"Unknown tool: {name}"
         tool = self.tools.get(name)
         if self.config.require_confirmation and tool.requires_confirmation:
             if not self.confirm(name, arguments):
+                if self.logger:
+                    self.logger.log_tool("tool_cancelled", tool=name, arguments=arguments)
                 return "Cancelled by user."
         context = ToolContext(
             workspace=self.config.workspace,
@@ -74,9 +130,50 @@ class Agent:
         try:
             result = tool.run(context, **arguments)
         except Exception as exc:  # noqa: BLE001 - surfaced to the CLI as tool failure text.
+            if self.logger:
+                self.logger.log_tool("tool_error", tool=name, arguments=arguments, error=str(exc))
             return f"Tool failed: {exc}"
         prefix = "OK" if result.ok else "ERROR"
-        return f"{prefix}: {result.content}"
+        output = f"{prefix}: {result.content}"
+        if self.logger:
+            self.logger.log_tool(
+                "tool_result",
+                tool=name,
+                arguments=arguments,
+                ok=result.ok,
+                content=result.content,
+            )
+        return output
+
+    @staticmethod
+    def _usage(
+        response: dict[str, Any],
+        messages: list[Message],
+        content: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> dict[str, object]:
+        usage = response.get("usage") or {}
+        if isinstance(usage, dict) and usage:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
+            return {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "estimated": False,
+            }
+
+        prompt_text = "\n".join(message.content for message in messages)
+        completion_text = content + "\n" + "\n".join(call["name"] for call in tool_calls)
+        prompt_tokens = estimate_tokens(prompt_text)
+        completion_tokens = estimate_tokens(completion_text)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "estimated": True,
+        }
 
     def _system_prompt(self, selected_skills: list[Any]):
         skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
@@ -88,8 +185,6 @@ class Agent:
             f"Available tools:\n{self.tools.descriptions()}\n\n"
             f"Relevant skills:\n{skill_text}"
         )
-        from little_agent.messages import Message
-
         return Message(role="system", content=content)
 
     @staticmethod

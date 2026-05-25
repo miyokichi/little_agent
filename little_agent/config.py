@@ -24,15 +24,24 @@ class AgentConfig:
     require_confirmation: bool
     openai_api_key: str | None
     openai_base_url: str
+    max_tool_steps: int = 5
+    enable_logging: bool = False
+    log_dir: Path | None = None
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
         load_dotenv()
         workspace = Path(os.getenv("LITTLE_AGENT_WORKSPACE", ".")).resolve()
+        configured_log_dir = Path(os.getenv("LITTLE_AGENT_LOG_DIR", "logs"))
+        log_dir = configured_log_dir if configured_log_dir.is_absolute() else workspace / configured_log_dir
+        log_dir = log_dir.resolve()
         return cls(
             model=os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini"),
             workspace=workspace,
             require_confirmation=_as_bool(os.getenv("LITTLE_AGENT_REQUIRE_CONFIRMATION"), True),
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            max_tool_steps=int(os.getenv("LITTLE_AGENT_MAX_TOOL_STEPS", "5")),
+            enable_logging=_as_bool(os.getenv("LITTLE_AGENT_ENABLE_LOGGING"), True),
+            log_dir=log_dir,
         )

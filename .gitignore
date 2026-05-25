@@ -9,3 +9,4 @@ build/
 data/tasks.json
 .test-*.json
 .test-*/
+logs/
