@@ -1,5 +1,6 @@
 from contextlib import suppress
 import json
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,13 @@ class CoreTests(unittest.TestCase):
         )
 
         self.assertEqual(calls, [{"id": "call_1", "name": "get_datetime", "arguments": {}}])
+
+    def test_openai_compatible_client_wraps_timeout(self) -> None:
+        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1", timeout=1)
+
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaisesRegex(RuntimeError, "timed out after 1 seconds"):
+                client._post_json("/chat/completions", {})
 
     def test_agent_returns_tool_result_to_llm_for_final_answer(self) -> None:
         class TwoStepLLM:

@@ -1,0 +1,55 @@
+{
+  "tools": [
+    {
+      "name": "extract_emails",
+      "script": "scripts/extract_emails.py",
+      "description": "Outlook から件名・送信元でフィルタしてメールを抽出 (CSV/JSON 出力)",
+      "parameters": [
+        {
+          "name": "source_type",
+          "type": "string",
+          "description": "メールのソース: 'live' (アクティブ Outlook) / 'pst' (.pst ファイル)",
+          "default": "live",
+          "enumerable": ["live", "pst"]
+        },
+        {
+          "name": "pst_path",
+          "type": "string",
+          "description": ".pst ファイルのフルパス (source_type=pst のみ必須)",
+          "default": null
+        },
+        {
+          "name": "subject_filter",
+          "type": "string",
+          "description": "件名に含まれる文字列フィルタ (大文字小文字区別なし、部分一致)",
+          "default": null
+        },
+        {
+          "name": "sender_filter",
+          "type": "string",
+          "description": "送信元に含まれる文字列フィルタ (名前またはメールアドレス、部分一致)",
+          "default": null
+        },
+        {
+          "name": "output_path",
+          "type": "string",
+          "description": "出力ファイルパス",
+          "default": "output_emails.csv"
+        },
+        {
+          "name": "output_format",
+          "type": "string",
+          "description": "出力フォーマット: 'csv' / 'json'",
+          "default": "csv",
+          "enumerable": ["csv", "json"]
+        },
+        {
+          "name": "include_body",
+          "type": "boolean",
+          "description": "本文プレビュー (500文字) を出力に含む",
+          "default": false
+        }
+      ]
+    }
+  ]
+}

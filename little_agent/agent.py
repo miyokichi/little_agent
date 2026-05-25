@@ -193,5 +193,6 @@ class Agent:
             return OpenAICompatibleChatClient(
                 api_key=config.openai_api_key,
                 base_url=config.openai_base_url,
+                timeout=config.llm_timeout_seconds,
             )
         return LocalRuleClient()

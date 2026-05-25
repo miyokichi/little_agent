@@ -27,6 +27,7 @@ class AgentConfig:
     max_tool_steps: int = 5
     enable_logging: bool = False
     log_dir: Path | None = None
+    llm_timeout_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -44,4 +45,5 @@ class AgentConfig:
             max_tool_steps=int(os.getenv("LITTLE_AGENT_MAX_TOOL_STEPS", "5")),
             enable_logging=_as_bool(os.getenv("LITTLE_AGENT_ENABLE_LOGGING"), True),
             log_dir=log_dir,
+            llm_timeout_seconds=int(os.getenv("LITTLE_AGENT_TIMEOUT_SECONDS", "60")),
         )

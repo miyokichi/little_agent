@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.request
 from uuid import uuid4
@@ -68,6 +69,8 @@ class OpenAICompatibleChatClient(LLMClient):
             raise RuntimeError(f"Chat completion API returned HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Could not reach chat completion API: {exc.reason}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise RuntimeError(f"Chat completion API timed out after {self.timeout} seconds.") from exc
 
         try:
             parsed = json.loads(raw)
