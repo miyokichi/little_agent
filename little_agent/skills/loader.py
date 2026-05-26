@@ -28,7 +28,10 @@ class SkillLoader:
             return []
         tools: list[ScriptSkillTool] = []
         for manifest_path in sorted(self.skills_dir.glob("*/tools.json")):
-            tools.extend(self._load_tools_manifest(manifest_path))
+            try:
+                tools.extend(self._load_tools_manifest(manifest_path))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                print(f"Warning: skipped invalid skill tool manifest {manifest_path}: {exc}")
         return tools
 
     def _load(self, path: Path) -> Skill:
@@ -58,17 +61,25 @@ class SkillLoader:
 
         skill_dir = path.parent
         tools: list[ScriptSkillTool] = []
-        for item in raw.get("tools", []):
+        manifest_tools = raw.get("tools", [])
+        if not isinstance(manifest_tools, list):
+            raise ValueError("'tools' must be a list.")
+        for item in manifest_tools:
             if not isinstance(item, dict):
                 continue
+            parameters = item.get("parameters") or {}
+            if not isinstance(parameters, dict):
+                raise ValueError(f"Tool '{item.get('name', '(unknown)')}' parameters must be a JSON Schema object.")
             script_path = (skill_dir / str(item["script"])).resolve()
             if skill_dir.resolve() not in [script_path, *script_path.parents]:
                 raise ValueError(f"Skill script is outside skill directory: {script_path}")
+            if not script_path.exists():
+                raise ValueError(f"Skill script does not exist: {script_path}")
             tools.append(
                 ScriptSkillTool(
                     name=str(item["name"]),
                     description=str(item["description"]),
-                    parameters=dict(item.get("parameters") or {}),
+                    parameters=parameters,
                     requires_confirmation=bool(item.get("requires_confirmation", False)),
                     script_path=script_path,
                     timeout_seconds=int(item.get("timeout_seconds", 30)),

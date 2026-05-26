@@ -13,11 +13,7 @@ Outlook のメール（ライブ Outlook、.pst ファイル）を **件名** �
 
 ## Allowed tools
 
-- read_file
-- write_file
-- run_powershell
-- write_excel
-- list_dir
+- extract_emails
 
 ## Instructions
 
