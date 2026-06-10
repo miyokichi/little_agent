@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
@@ -28,6 +28,7 @@ class AgentConfig:
     enable_logging: bool = False
     log_dir: Path | None = None
     llm_timeout_seconds: int = 60
+    global_memory_path: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "memory.md")
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -36,6 +37,8 @@ class AgentConfig:
         configured_log_dir = Path(os.getenv("LITTLE_AGENT_LOG_DIR", "logs"))
         log_dir = configured_log_dir if configured_log_dir.is_absolute() else workspace / configured_log_dir
         log_dir = log_dir.resolve()
+        raw_global_memory = os.getenv("LITTLE_AGENT_GLOBAL_MEMORY_PATH")
+        global_memory_path = Path(raw_global_memory).resolve() if raw_global_memory else Path.home() / ".little_agent" / "memory.md"
         return cls(
             model=os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini"),
             workspace=workspace,
@@ -46,4 +49,5 @@ class AgentConfig:
             enable_logging=_as_bool(os.getenv("LITTLE_AGENT_ENABLE_LOGGING"), True),
             log_dir=log_dir,
             llm_timeout_seconds=int(os.getenv("LITTLE_AGENT_TIMEOUT_SECONDS", "60")),
+            global_memory_path=global_memory_path,
         )

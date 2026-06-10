@@ -1,6 +1,7 @@
 from little_agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 from little_agent.tools.datetime_tool import GetDateTimeTool
 from little_agent.tools.filesystem import ListDirTool, ReadFileTool, SearchFilesTool, WriteFileTool
+from little_agent.tools.memory_tool import UpdateGlobalMemoryTool, UpdateWorkspaceMemoryTool
 from little_agent.tools.shell import RunPowerShellTool
 
 
@@ -23,5 +24,7 @@ __all__ = [
     "ToolContext",
     "ToolRegistry",
     "ToolResult",
+    "UpdateGlobalMemoryTool",
+    "UpdateWorkspaceMemoryTool",
     "default_tools",
 ]

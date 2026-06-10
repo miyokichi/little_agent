@@ -6,10 +6,10 @@ from typing import Any
 from little_agent.config import AgentConfig
 from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
 from little_agent.logging import RunLogger, estimate_tokens
-from little_agent.memory import ConversationMemory
+from little_agent.memory import ConversationMemory, MasterMemory
 from little_agent.messages import Message
 from little_agent.skills.loader import SkillLoader
-from little_agent.tools import default_tools
+from little_agent.tools import UpdateGlobalMemoryTool, UpdateWorkspaceMemoryTool, default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
 
 
@@ -34,6 +34,10 @@ class Agent:
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
         self.memory = ConversationMemory()
+        self.workspace_memory = MasterMemory(config.workspace / "memory.md")
+        self.global_memory = MasterMemory(config.global_memory_path)
+        self.tools.register(UpdateWorkspaceMemoryTool(self.workspace_memory))
+        self.tools.register(UpdateGlobalMemoryTool(self.global_memory))
         self.logger = RunLogger(config.log_dir or (config.workspace / "logs")) if config.enable_logging else None
 
     def run(self, user_text: str) -> str:
@@ -177,6 +181,15 @@ class Agent:
 
     def _system_prompt(self, selected_skills: list[Any]):
         skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
+
+        global_mem = self.global_memory.load()
+        workspace_mem = self.workspace_memory.load()
+        memory_section = ""
+        if global_mem:
+            memory_section += f"\n\n## Global Memory\n{global_mem}"
+        if workspace_mem:
+            memory_section += f"\n\n## Workspace Memory\n{workspace_mem}"
+
         content = (
             "You are Little Agent, a Windows-friendly Python agent system. "
             "Use tools when they help. Keep actions inside the configured workspace. "
@@ -184,6 +197,7 @@ class Agent:
             f"Workspace: {self.config.workspace}\n\n"
             f"Available tools:\n{self.tools.descriptions()}\n\n"
             f"Relevant skills:\n{skill_text}"
+            f"{memory_section}"
         )
         return Message(role="system", content=content)
 
