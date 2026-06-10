@@ -7,6 +7,12 @@ import urllib.request
 from uuid import uuid4
 from typing import Any
 
+try:
+    from json_repair import repair_json as _repair_json
+    _HAS_JSON_REPAIR = True
+except ImportError:
+    _HAS_JSON_REPAIR = False
+
 from little_agent.messages import Message
 from little_agent.tools.base import ToolRegistry
 
@@ -148,6 +154,9 @@ class LocalRuleClient(LLMClient):
 
 
 def _json_object(raw: str) -> dict[str, Any]:
+    if _HAS_JSON_REPAIR:
+        parsed = _repair_json(raw, return_objects=True)
+        return parsed if isinstance(parsed, dict) else {}
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:

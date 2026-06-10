@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "python-dotenv>=1.0.1",
+  "json-repair>=0.30.0",
 ]
 
 [project.optional-dependencies]
