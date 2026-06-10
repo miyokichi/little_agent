@@ -12,8 +12,8 @@ def main() -> int:
         payload = json.loads(sys.stdin.read() or "{}")
         tool = str(payload.get("tool") or (sys.argv[1] if len(sys.argv) > 1 else ""))
 
-        if tool == "get_current_datetime":
-            result = get_current_datetime()
+        if tool == "get_datetime":
+            result = get_datetime()
         else:
             result = {"ok": False, "content": f"Unknown tool: {tool}"}
     except Exception as exc:  # noqa: BLE001
@@ -23,7 +23,7 @@ def main() -> int:
     return 0
 
 
-def get_current_datetime() -> dict[str, object]:
+def get_datetime() -> dict[str, object]:
     now = datetime.now().astimezone()
     weekday_ja = WEEKDAYS_JA[now.weekday()]
     lines = [

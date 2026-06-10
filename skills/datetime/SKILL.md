@@ -9,8 +9,8 @@
 - タイムゾーンを含めた正確な日時が必要なとき
 
 ## Allowed tools
-- get_current_datetime
+- get_datetime
 
 ## Instructions
-- ユーザーが「今何時？」「今日は何日？」などを聞いたら `get_current_datetime` を呼ぶ。
+- ユーザーが「今何時？」「今日は何日？」などを聞いたら `get_datetime` を呼ぶ。
 - 結果を自然な日本語または英語でユーザーに伝える。

@@ -1,5 +1,4 @@
 from little_agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
-from little_agent.tools.datetime_tool import GetDateTimeTool
 from little_agent.tools.filesystem import ListDirTool, ReadFileTool, SearchFilesTool, WriteFileTool
 from little_agent.tools.memory_tool import UpdateGlobalMemoryTool, UpdateWorkspaceMemoryTool
 from little_agent.tools.shell import RunPowerShellTool
@@ -8,7 +7,6 @@ from little_agent.tools.shell import RunPowerShellTool
 def default_tools() -> ToolRegistry:
     registry = ToolRegistry()
     for tool in [
-        GetDateTimeTool(),
         ListDirTool(),
         ReadFileTool(),
         WriteFileTool(),
