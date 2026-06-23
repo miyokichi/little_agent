@@ -244,6 +244,11 @@ class CoreTests(unittest.TestCase):
         self.assertIn("write_excel", names)
         self.assertIn("read_ppt", names)
         self.assertIn("write_ppt", names)
+        self.assertIn("git_status", names)
+        self.assertIn("git_diff", names)
+        self.assertIn("git_log", names)
+        self.assertIn("git_add", names)
+        self.assertIn("git_commit", names)
 
     def test_default_tools_do_not_include_portable_task_manager_tools(self) -> None:
         names = default_tools().names()
