@@ -74,6 +74,83 @@ class WriteFileTool:
         return ToolResult(True, f"Wrote {path.relative_to(context.workspace)}")
 
 
+class AppendFileTool:
+    name = "append_to_file"
+    description = "Append UTF-8 text to a file inside the workspace. Creates the file if missing."
+    requires_confirmation = True
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Workspace-relative file path."},
+            "content": {"type": "string", "description": "Text to append to the end of the file."},
+        },
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    }
+
+    def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
+        path = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        if path.exists() and not path.is_file():
+            return ToolResult(False, f"Path is not a file: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(str(kwargs["content"]))
+        return ToolResult(True, f"Appended to {path.relative_to(context.workspace)}")
+
+
+class DeleteFileTool:
+    name = "delete_file"
+    description = "Delete a file inside the workspace."
+    requires_confirmation = True
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Workspace-relative file path."},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+
+    def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
+        path = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        if not path.exists():
+            return ToolResult(False, f"File does not exist: {path}")
+        if not path.is_file():
+            return ToolResult(False, f"Path is not a file: {path}")
+        path.unlink()
+        return ToolResult(True, f"Deleted {path.relative_to(context.workspace)}")
+
+
+class MoveFileTool:
+    name = "move_file"
+    description = "Move or rename a file inside the workspace. Creates destination parent directories."
+    requires_confirmation = True
+    parameters = {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string", "description": "Workspace-relative source file path."},
+            "destination": {"type": "string", "description": "Workspace-relative destination file path."},
+        },
+        "required": ["source", "destination"],
+        "additionalProperties": False,
+    }
+
+    def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
+        source = resolve_workspace_path(context.workspace, str(kwargs["source"]))
+        destination = resolve_workspace_path(context.workspace, str(kwargs["destination"]))
+        if not source.exists():
+            return ToolResult(False, f"Source does not exist: {source}")
+        if not source.is_file():
+            return ToolResult(False, f"Source is not a file: {source}")
+        if destination.exists():
+            return ToolResult(False, f"Destination already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(destination)
+        rel_source = source.relative_to(context.workspace)
+        rel_destination = destination.relative_to(context.workspace)
+        return ToolResult(True, f"Moved {rel_source} -> {rel_destination}")
+
+
 class SearchFilesTool:
     name = "search_files"
     description = "Search for text in UTF-8 files under a workspace path."

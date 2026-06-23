@@ -36,6 +36,66 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside workspace"):
             resolve_workspace_path(workspace, "..")
 
+    def test_filesystem_append_delete_move_tools(self) -> None:
+        workspace = (Path.cwd() / ".test-fs-workspace").resolve()
+        context = ToolContext(workspace=workspace)
+        tools = default_tools()
+
+        try:
+            tools.get("write_file").run(context, path="a.txt", content="hello")
+            appended = tools.get("append_to_file").run(context, path="a.txt", content=" world")
+            content_after_append = (workspace / "a.txt").read_text(encoding="utf-8")
+
+            moved = tools.get("move_file").run(context, source="a.txt", destination="sub/b.txt")
+            source_gone = not (workspace / "a.txt").exists()
+            dest_exists = (workspace / "sub" / "b.txt").exists()
+
+            deleted = tools.get("delete_file").run(context, path="sub/b.txt")
+            dest_gone = not (workspace / "sub" / "b.txt").exists()
+        finally:
+            for path in [workspace / "a.txt", workspace / "sub" / "b.txt"]:
+                path.unlink(missing_ok=True)
+            with suppress(OSError):
+                (workspace / "sub").rmdir()
+            with suppress(OSError):
+                workspace.rmdir()
+
+        self.assertTrue(appended.ok)
+        self.assertEqual(content_after_append, "hello world")
+        self.assertTrue(moved.ok)
+        self.assertTrue(source_gone)
+        self.assertTrue(dest_exists)
+        self.assertTrue(deleted.ok)
+        self.assertTrue(dest_gone)
+
+    def test_delete_and_move_reject_missing_or_directory(self) -> None:
+        workspace = (Path.cwd() / ".test-fs-guard-workspace").resolve()
+        context = ToolContext(workspace=workspace)
+        tools = default_tools()
+
+        try:
+            (workspace / "data").mkdir(parents=True, exist_ok=True)
+            missing = tools.get("delete_file").run(context, path="nope.txt")
+            on_dir = tools.get("delete_file").run(context, path="data")
+            move_missing = tools.get("move_file").run(context, source="nope.txt", destination="x.txt")
+        finally:
+            with suppress(OSError):
+                (workspace / "data").rmdir()
+            with suppress(OSError):
+                workspace.rmdir()
+
+        self.assertFalse(missing.ok)
+        self.assertFalse(on_dir.ok)
+        self.assertFalse(move_missing.ok)
+
+    def test_fetch_url_rejects_non_http_scheme(self) -> None:
+        from little_agent.tools.web import FetchUrlTool
+
+        result = FetchUrlTool().run(ToolContext(workspace=Path.cwd()), url="ftp://example.com")
+
+        self.assertFalse(result.ok)
+        self.assertIn("http(s)", result.content)
+
     def test_local_fallback_agent_can_use_datetime(self) -> None:
         config = AgentConfig(
             model="local",
