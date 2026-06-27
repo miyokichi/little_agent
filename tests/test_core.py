@@ -10,7 +10,7 @@ from little_agent.llm import OpenAICompatibleChatClient
 from little_agent.messages import Message
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
-from little_agent.tools.base import ToolContext, ToolRegistry, resolve_workspace_path
+from little_agent.tools.base import ToolContext, ToolRegistry, ToolResult, resolve_workspace_path
 
 
 class CoreTests(unittest.TestCase):
@@ -95,6 +95,64 @@ class CoreTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("http(s)", result.content)
+
+    def test_message_payload_passes_through_multimodal_content(self) -> None:
+        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
+        blocks = [
+            {"type": "text", "text": "look:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]
+        message = Message(role="user", content=blocks)
+
+        payload = client._message_payload(message)
+
+        self.assertEqual(payload["content"], blocks)
+
+    def test_agent_forwards_tool_image_output_to_model(self) -> None:
+        class ImageTool:
+            name = "fake_capture"
+            description = "Return an image."
+            requires_confirmation = False
+            parameters = {"type": "object", "properties": {}, "additionalProperties": False}
+
+            def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
+                return ToolResult(True, "captured", images=("data:image/png;base64,AAAA",))
+
+        class TwoStepLLM:
+            def __init__(self) -> None:
+                self.calls: list[list[Message]] = []
+
+            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
+                self.calls.append([*messages])
+                if len(self.calls) == 1:
+                    return {"content": "", "tool_calls": [{"id": "call_1", "name": "fake_capture", "arguments": {}}]}
+                return {"content": "I can see the image.", "tool_calls": []}
+
+        registry = ToolRegistry()
+        registry.register(ImageTool())
+        config = AgentConfig(
+            model="local",
+            workspace=Path.cwd().resolve(),
+            require_confirmation=False,
+            openai_api_key=None,
+            openai_base_url="https://api.openai.com/v1",
+        )
+        llm = TwoStepLLM()
+        agent = Agent(config, SkillLoader(Path("skills").resolve()), tools=registry, llm=llm)  # type: ignore[arg-type]
+
+        answer = agent.run("capture the screen")
+
+        self.assertEqual(answer, "I can see the image.")
+        image_messages = [
+            message
+            for message in llm.calls[1]
+            if message.role == "user"
+            and isinstance(message.content, list)
+            and any(block.get("type") == "image_url" for block in message.content)
+        ]
+        self.assertEqual(len(image_messages), 1)
+        image_block = next(b for b in image_messages[0].content if b.get("type") == "image_url")
+        self.assertEqual(image_block["image_url"]["url"], "data:image/png;base64,AAAA")
 
     def test_local_fallback_agent_can_use_datetime(self) -> None:
         config = AgentConfig(
@@ -250,20 +308,6 @@ class CoreTests(unittest.TestCase):
         self.assertIn("git_add", names)
         self.assertIn("git_commit", names)
         self.assertIn("take_screenshot", names)
-        self.assertIn("describe_screen", names)
-
-    def test_describe_screen_requires_api_key(self) -> None:
-        workspace = (Path.cwd() / ".test-screen-workspace").resolve()
-        context = ToolContext(workspace=workspace)
-        tools = ToolRegistry()
-        for tool in SkillLoader(Path("skills").resolve()).load_tools():
-            tools.register(tool)
-
-        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}, clear=False):
-            result = tools.get("describe_screen").run(context)
-
-        self.assertFalse(result.ok)
-        self.assertIn("OPENAI_API_KEY", result.content)
 
     def test_default_tools_do_not_include_portable_task_manager_tools(self) -> None:
         names = default_tools().names()

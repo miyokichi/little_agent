@@ -2,39 +2,12 @@
   "tools": [
     {
       "name": "take_screenshot",
-      "description": "Capture the PC screen and save it as a PNG file inside the workspace.",
+      "description": "Capture the PC screen and return the image to the model so it can see what is on screen. Optionally also saves a PNG in the workspace.",
       "script": "scripts/screen_capture.py",
       "requires_confirmation": false,
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "description": "Workspace-relative path to save the PNG. Defaults to screenshots/screen.png."
-          },
-          "region": {
-            "type": "array",
-            "description": "Optional capture region as [x, y, width, height]. Captures the full screen if omitted.",
-            "items": { "type": "integer" },
-            "minItems": 4,
-            "maxItems": 4
-          }
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "describe_screen",
-      "description": "Capture the PC screen and use a vision model to describe what is shown. Returns a text description.",
-      "script": "scripts/screen_capture.py",
-      "requires_confirmation": false,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "prompt": {
-            "type": "string",
-            "description": "What to ask the vision model about the screen. Defaults to a general description."
-          },
           "save_path": {
             "type": "string",
             "description": "Optional workspace-relative path to also save the captured PNG."

@@ -46,8 +46,11 @@ class ScriptSkillTool:
 
         if not isinstance(data, dict):
             return ToolResult(False, "Script returned a non-object JSON response.")
+        raw_images = data.get("images") or []
+        images = tuple(str(item) for item in raw_images) if isinstance(raw_images, list) else ()
         return ToolResult(
             ok=bool(data.get("ok")),
             content=str(data.get("content", "")),
+            images=images,
         )
 

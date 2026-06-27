@@ -122,6 +122,16 @@ skills/<skill_name>/
 }
 ```
 
+画像をモデルに渡したい場合は、`images` にdata URIの配列を含めます（任意）。
+
+```json
+{
+  "ok": true,
+  "content": "Captured screen 1568x882.",
+  "images": ["data:image/png;base64,..."]
+}
+```
+
 この構成にすると、`skills/<skill_name>` フォルダをコピーするだけでSkillの説明、Tool定義、実行ロジックをまとめて移動できます。
 
 ### タスク管理仕様
@@ -318,14 +328,13 @@ PowerPoint用Tool:
 - 既存ファイルの高度な編集ではなく、読み取りと簡易新規作成が中心です。
 - 書式、画像、グラフ、アニメーション、ノート、複雑なレイアウトの完全再現は対象外です。
 
-### 画面取得Skill
+### 画面取得Skill（マルチモーダル版）
 
-`skills/screen_capture` は、PC画面のスクリーンショット取得と、Vision対応モデルによる画面内容の説明を行うSkillです。画面の「取得」専用で、マウス/キーボード操作は行いません。
+`skills/screen_capture` は、PC画面のスクリーンショットを取得し、その画像を**本体のLLM（Vision対応モデル）に直接渡す**Skillです。画面の「取得」専用で、マウス/キーボード操作は行いません。
 
 | Tool | 内容 | 確認 |
 | --- | --- | --- |
-| `take_screenshot` | 画面をキャプチャしPNG保存 | 不要 |
-| `describe_screen` | 画面をキャプチャしVision APIで内容を説明 | 不要 |
+| `take_screenshot` | 画面をキャプチャし、画像をモデルに渡す（任意でPNG保存） | 不要 |
 
 セットアップ:
 
@@ -333,19 +342,28 @@ PowerPoint用Tool:
 pip install mss Pillow
 ```
 
-`describe_screen` は `OPENAI_API_KEY` を使ってVision対応モデルを呼び出します。使用モデルは `LITTLE_AGENT_VISION_MODEL`（既定は `LITTLE_AGENT_MODEL`）で指定できます。
+このSkillはVision APIを別途呼ばず、取得画像を本体の会話に画像メッセージとして差し込みます。`LITTLE_AGENT_MODEL` にVision対応モデルを設定してください。
 
 例:
 
 ```text
-> スクリーンショットを撮って
-> 今の画面に何が映っているか説明して
+> スクリーンショットを撮って今の画面を説明して
+> 画面の左上に何があるか見て
 ```
 
 制限:
 
 - GUIセッションが必要です。ヘッドレス環境ではキャプチャに失敗します。
-- 画面はVision送信前に最大幅1568pxへ縮小されます。
+- 画像はモデル送信前に最大幅1568pxへ縮小されます。
+
+#### マルチモーダル対応の仕組み
+
+このブランチでは、Tool結果として画像を返せるようcore側を拡張しています。
+
+- `ToolResult` に `images`（data URIのタプル）を追加
+- `Message.content` を文字列に加えて content-block のリストでも持てるよう拡張
+- Tool実行後、`tool` メッセージ（テキスト）に続けて、画像を `image_url` ブロックとして持つ `user` メッセージを追加してモデルに渡す（OpenAI形式では `tool` メッセージに画像を入れられないため）
+- Skill Script Toolは標準出力JSONに `images` 配列（data URI）を返すことで画像を渡せる
 
 ## テスト
 

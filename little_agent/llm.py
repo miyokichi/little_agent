@@ -13,7 +13,7 @@ try:
 except ImportError:
     _HAS_JSON_REPAIR = False
 
-from little_agent.messages import Message
+from little_agent.messages import Message, text_content
 from little_agent.tools.base import ToolRegistry
 
 
@@ -133,9 +133,12 @@ class LocalRuleClient(LLMClient):
     ) -> dict[str, Any]:
         tool_messages = [message for message in messages if message.role == "tool"]
         if tool_messages:
-            return {"content": tool_messages[-1].content, "tool_calls": [], "usage": {}}
+            return {"content": text_content(tool_messages[-1].content), "tool_calls": [], "usage": {}}
 
-        text = next((message.content for message in reversed(messages) if message.role == "user"), "")
+        text = next(
+            (text_content(message.content) for message in reversed(messages) if message.role == "user"),
+            "",
+        )
         lowered = text.lower()
         if "time" in lowered or "date" in lowered:
             return {"content": "", "tool_calls": [{"name": "get_datetime", "arguments": {}}], "usage": {}}

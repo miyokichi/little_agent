@@ -15,6 +15,9 @@ class ToolContext:
 class ToolResult:
     ok: bool
     content: str
+    # Optional image outputs as data URIs (e.g. "data:image/png;base64,...").
+    # These are forwarded to the model as image_url content blocks.
+    images: tuple[str, ...] = ()
 
 
 class Tool(Protocol):

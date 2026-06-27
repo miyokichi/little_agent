@@ -7,7 +7,7 @@ from little_agent.config import AgentConfig
 from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
 from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory import ConversationMemory, MasterMemory
-from little_agent.messages import Message
+from little_agent.messages import Message, text_content
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import UpdateGlobalMemoryTool, UpdateWorkspaceMemoryTool, default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
@@ -81,8 +81,9 @@ class Agent:
                 break
 
             messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+            pending_images: list[tuple[str, str]] = []
             for call in tool_calls:
-                output = self._run_tool(call["name"], call.get("arguments", {}))
+                output, images = self._run_tool(call["name"], call.get("arguments", {}))
                 messages.append(
                     Message(
                         role="tool",
@@ -90,6 +91,15 @@ class Agent:
                         tool_call_id=call["id"],
                     )
                 )
+                pending_images.extend((call["name"], uri) for uri in images)
+            # Tool messages cannot carry images in the OpenAI chat format, so image
+            # outputs are forwarded in a follow-up user message after all tool replies.
+            if pending_images:
+                blocks: list[dict[str, Any]] = []
+                for name, uri in pending_images:
+                    blocks.append({"type": "text", "text": f"Image output from {name}:"})
+                    blocks.append({"type": "image_url", "image_url": {"url": uri}})
+                messages.append(Message(role="user", content=blocks))
         else:
             final = f"Stopped after {self.config.max_tool_steps} tool step(s)."
 
@@ -116,17 +126,17 @@ class Agent:
             )
         return [call for call in normalized if call["name"]]
 
-    def _run_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    def _run_tool(self, name: str, arguments: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
         if name not in self.tools.names():
             if self.logger:
                 self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
-            return f"Unknown tool: {name}"
+            return f"Unknown tool: {name}", ()
         tool = self.tools.get(name)
         if self.config.require_confirmation and tool.requires_confirmation:
             if not self.confirm(name, arguments):
                 if self.logger:
                     self.logger.log_tool("tool_cancelled", tool=name, arguments=arguments)
-                return "Cancelled by user."
+                return "Cancelled by user.", ()
         context = ToolContext(
             workspace=self.config.workspace,
             require_confirmation=self.config.require_confirmation,
@@ -136,7 +146,7 @@ class Agent:
         except Exception as exc:  # noqa: BLE001 - surfaced to the CLI as tool failure text.
             if self.logger:
                 self.logger.log_tool("tool_error", tool=name, arguments=arguments, error=str(exc))
-            return f"Tool failed: {exc}"
+            return f"Tool failed: {exc}", ()
         prefix = "OK" if result.ok else "ERROR"
         output = f"{prefix}: {result.content}"
         if self.logger:
@@ -146,8 +156,9 @@ class Agent:
                 arguments=arguments,
                 ok=result.ok,
                 content=result.content,
+                images=len(result.images),
             )
-        return output
+        return output, result.images
 
     @staticmethod
     def _usage(
@@ -168,7 +179,7 @@ class Agent:
                 "estimated": False,
             }
 
-        prompt_text = "\n".join(message.content for message in messages)
+        prompt_text = "\n".join(text_content(message.content) for message in messages)
         completion_text = content + "\n" + "\n".join(call["name"] for call in tool_calls)
         prompt_tokens = estimate_tokens(prompt_text)
         completion_tokens = estimate_tokens(completion_text)

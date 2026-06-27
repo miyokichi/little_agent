@@ -3,22 +3,11 @@ from __future__ import annotations
 import base64
 import io
 import json
-import os
-import socket
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-try:
-    from dotenv import load_dotenv
-except ModuleNotFoundError:
-    def load_dotenv() -> bool:
-        return False
-
-_DEFAULT_SCREENSHOT_PATH = "screenshots/screen.png"
-_DEFAULT_PROMPT = "この画面に何が表示されているか説明して。"
+# Downscale wide screenshots before sending them to the model to limit tokens.
 _MAX_WIDTH = 1568
 
 
@@ -33,8 +22,6 @@ def main() -> int:
 
         if tool == "take_screenshot":
             result = take_screenshot(workspace, arguments)
-        elif tool == "describe_screen":
-            result = describe_screen(workspace, arguments)
         else:
             result = {"ok": False, "content": f"Unknown screen tool: {tool}"}
     except Exception as exc:  # noqa: BLE001 - serialized for the host agent.
@@ -45,38 +32,12 @@ def main() -> int:
 
 
 def take_screenshot(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
-    raw_path = str(arguments.get("path") or _DEFAULT_SCREENSHOT_PATH).strip()
-    target = safe_workspace_path(workspace, raw_path)
-    if target is None:
-        return {"ok": False, "content": f"Path is outside workspace: {raw_path}"}
-
-    captured = capture_image(arguments.get("region"))
-    if "error" in captured:
-        return {"ok": False, "content": captured["error"]}
-    image = captured["image"]
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    image.save(target, format="PNG")
-    rel = target.relative_to(workspace)
-    return {"ok": True, "content": f"Saved screenshot to {rel} ({image.width}x{image.height})"}
-
-
-def describe_screen(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
-    # Validate API config BEFORE capturing so the error path is testable headlessly.
-    load_dotenv()
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return {"ok": False, "content": "OPENAI_API_KEY is not configured; cannot describe the screen."}
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("LITTLE_AGENT_VISION_MODEL") or os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini")
-    timeout = int(os.getenv("LITTLE_AGENT_TIMEOUT_SECONDS", "60"))
-    prompt = str(arguments.get("prompt") or _DEFAULT_PROMPT).strip()
-
     captured = capture_image(arguments.get("region"))
     if "error" in captured:
         return {"ok": False, "content": captured["error"]}
     image = downscale(captured["image"], _MAX_WIDTH)
 
+    saved_note = ""
     save_path = str(arguments.get("save_path") or "").strip()
     if save_path:
         target = safe_workspace_path(workspace, save_path)
@@ -84,9 +45,14 @@ def describe_screen(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any
             return {"ok": False, "content": f"save_path is outside workspace: {save_path}"}
         target.parent.mkdir(parents=True, exist_ok=True)
         image.save(target, format="PNG")
+        saved_note = f" (saved to {target.relative_to(workspace)})"
 
     data_uri = png_data_uri(image)
-    return call_vision(base_url, api_key, model, timeout, prompt, data_uri)
+    return {
+        "ok": True,
+        "content": f"Captured screen {image.width}x{image.height}{saved_note}.",
+        "images": [data_uri],
+    }
 
 
 def capture_image(region: Any) -> dict[str, Any]:
@@ -133,57 +99,6 @@ def png_data_uri(image: Any) -> str:
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
-
-
-def call_vision(
-    base_url: str,
-    api_key: str,
-    model: str,
-    timeout: int,
-    prompt: str,
-    data_uri: str,
-) -> dict[str, Any]:
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                ],
-            }
-        ],
-    }
-    request = urllib.request.Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        return {"ok": False, "content": f"Vision API returned HTTP {exc.code}: {detail}"}
-    except urllib.error.URLError as exc:
-        return {"ok": False, "content": f"Could not reach vision API: {exc.reason}"}
-    except (TimeoutError, socket.timeout):
-        return {"ok": False, "content": f"Vision API timed out after {timeout} seconds."}
-
-    try:
-        parsed = json.loads(raw)
-        content = parsed["choices"][0]["message"]["content"]
-    except (json.JSONDecodeError, KeyError, IndexError) as exc:
-        return {"ok": False, "content": f"Unexpected vision API response: {exc}"}
-
-    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-    return {"ok": True, "content": text.strip()}
 
 
 def safe_workspace_path(workspace: Path, raw: str) -> Path | None:

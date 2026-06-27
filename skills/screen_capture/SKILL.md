@@ -1,32 +1,29 @@
 # screen_capture
 
 ## Description
-PC画面のスクリーンショット取得と、Vision API を使った画面内容の説明を支援する。
+PC画面のスクリーンショットを取得し、画像を本体モデルに直接渡して画面内容を理解させる。
 
 ## When to use
 - ユーザーが「スクリーンショットを撮って」「画面を保存して」と依頼したとき
 - 「今の画面を説明して」「画面に何が映っているか教えて」と聞かれたとき
-- 画面上の表示内容を確認・要約したいとき
+- 画面上の表示内容を確認・要約・操作判断したいとき
 
 ## Allowed tools
 - take_screenshot
-- describe_screen
 
 ## Setup
 このスキルにはスクリーンショット用のライブラリが必要です。
 
     pip install mss Pillow
 
-`describe_screen` は Vision 対応モデルへの API 呼び出しを行うため、以下の環境変数を使用します（`.env` でも可）。
-
-- `OPENAI_API_KEY`（必須）
-- `OPENAI_BASE_URL`（任意, 既定 `https://api.openai.com/v1`）
-- `LITTLE_AGENT_VISION_MODEL`（任意, 既定は `LITTLE_AGENT_MODEL` → `gpt-4.1-mini`）
-- `LITTLE_AGENT_TIMEOUT_SECONDS`（任意, 既定 60）
+このスキルは取得した画像を**本体のLLM（Vision対応モデル）に直接渡します**。
+そのため `LITTLE_AGENT_MODEL` は Vision 対応モデル（例: `gpt-4.1-mini`）を指定してください。
+スキル内で別途 Vision API を呼ぶことはありません。
 
 ## Instructions
-- 画面を保存するだけなら `take_screenshot` を使う。保存先は省略可（既定 `screenshots/screen.png`）。
-- 画面の内容を理解・要約したいときは `describe_screen` を使う。具体的に知りたいことがあれば `prompt` に指定する。
+- 画面を見る/説明する/保存するいずれの場合も `take_screenshot` を使う。
+- 取得した画像はモデルに渡されるので、モデルがそのまま内容を説明・判断できる。
+- 画像を残したい場合は `save_path` を指定する（省略時は保存しない）。
 - 一部の領域だけ対象にしたい場合は `region` に `[x, y, width, height]` を渡す。
 - このスキルは画面の「取得」専用。マウス/キーボードによる操作は行わない。
 - GUI セッションが無い環境（ヘッドレス）ではキャプチャに失敗する。その場合はエラー内容をユーザーに伝える。
