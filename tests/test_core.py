@@ -249,6 +249,21 @@ class CoreTests(unittest.TestCase):
         self.assertIn("git_log", names)
         self.assertIn("git_add", names)
         self.assertIn("git_commit", names)
+        self.assertIn("take_screenshot", names)
+        self.assertIn("describe_screen", names)
+
+    def test_describe_screen_requires_api_key(self) -> None:
+        workspace = (Path.cwd() / ".test-screen-workspace").resolve()
+        context = ToolContext(workspace=workspace)
+        tools = ToolRegistry()
+        for tool in SkillLoader(Path("skills").resolve()).load_tools():
+            tools.register(tool)
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}, clear=False):
+            result = tools.get("describe_screen").run(context)
+
+        self.assertFalse(result.ok)
+        self.assertIn("OPENAI_API_KEY", result.content)
 
     def test_default_tools_do_not_include_portable_task_manager_tools(self) -> None:
         names = default_tools().names()

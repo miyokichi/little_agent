@@ -194,6 +194,9 @@ Agentが従う手順や注意点。
 - `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証
 - `excel_file`: `.xlsx` の読み取りと簡易作成
 - `ppt_file`: `.pptx` のテキスト読み取りと簡易作成
+- `datetime`: 現在日時・曜日・タイムゾーンの取得
+- `git`: gitリポジトリの状態確認・差分・コミット
+- `screen_capture`: PC画面のスクリーンショット取得とVisionによる画面説明
 
 Skill選択は軽量なキーワードスコアリングです。将来的にはembedding検索やLLMによるSkill routingに差し替えられます。
 
@@ -314,6 +317,35 @@ PowerPoint用Tool:
 - `.xls` と `.ppt` は非対応です。
 - 既存ファイルの高度な編集ではなく、読み取りと簡易新規作成が中心です。
 - 書式、画像、グラフ、アニメーション、ノート、複雑なレイアウトの完全再現は対象外です。
+
+### 画面取得Skill
+
+`skills/screen_capture` は、PC画面のスクリーンショット取得と、Vision対応モデルによる画面内容の説明を行うSkillです。画面の「取得」専用で、マウス/キーボード操作は行いません。
+
+| Tool | 内容 | 確認 |
+| --- | --- | --- |
+| `take_screenshot` | 画面をキャプチャしPNG保存 | 不要 |
+| `describe_screen` | 画面をキャプチャしVision APIで内容を説明 | 不要 |
+
+セットアップ:
+
+```powershell
+pip install mss Pillow
+```
+
+`describe_screen` は `OPENAI_API_KEY` を使ってVision対応モデルを呼び出します。使用モデルは `LITTLE_AGENT_VISION_MODEL`（既定は `LITTLE_AGENT_MODEL`）で指定できます。
+
+例:
+
+```text
+> スクリーンショットを撮って
+> 今の画面に何が映っているか説明して
+```
+
+制限:
+
+- GUIセッションが必要です。ヘッドレス環境ではキャプチャに失敗します。
+- 画面はVision送信前に最大幅1568pxへ縮小されます。
 
 ## テスト
 
