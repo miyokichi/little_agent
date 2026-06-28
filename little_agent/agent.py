@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import Any
 
 from little_agent.config import AgentConfig
+from little_agent.control import StopController
 from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
 from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory import ConversationMemory, MasterMemory
@@ -24,6 +25,7 @@ class Agent:
         tools: ToolRegistry | None = None,
         llm: LLMClient | None = None,
         confirm: ConfirmCallback | None = None,
+        stop: StopController | None = None,
     ) -> None:
         self.config = config
         self.skills = skills
@@ -33,6 +35,10 @@ class Agent:
                 self.tools.register(tool)
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
+        self.stop = stop or StopController(config.stop_hotkey)
+        # Once the user approves a confirmation, the rest of the session runs
+        # without further prompts (session-wide approval).
+        self._session_approved = False
         self.memory = ConversationMemory()
         self.workspace_memory = MasterMemory(config.workspace / "memory.md")
         self.global_memory = MasterMemory(config.global_memory_path)
@@ -53,55 +59,83 @@ class Agent:
         messages.append(type(system_prompt)(role="user", content=user_text))
 
         final = ""
-        for _step in range(max(self.config.max_tool_steps, 1)):
-            try:
-                response = self.llm.complete(self.config.model, messages, self.tools)
-            except RuntimeError as exc:
+        self.stop.reset()
+        self.stop.arm()
+        try:
+            for _step in range(max(self.config.max_tool_steps, 1)):
+                if self.stop.triggered:
+                    final = self._stop_message()
+                    break
+                try:
+                    response = self.llm.complete(self.config.model, messages, self.tools)
+                except RuntimeError as exc:
+                    if self.logger:
+                        self.logger.log_conversation("llm_error", error=str(exc))
+                    return f"LLM request failed: {exc}"
+
+                tool_calls = self._normalize_tool_calls(response.get("tool_calls", []))
+                content = response.get("content", "").strip()
                 if self.logger:
-                    self.logger.log_conversation("llm_error", error=str(exc))
-                return f"LLM request failed: {exc}"
-
-            tool_calls = self._normalize_tool_calls(response.get("tool_calls", []))
-            content = response.get("content", "").strip()
-            if self.logger:
-                self.logger.log_conversation(
-                    "assistant_message",
-                    content=content,
-                    tool_calls=tool_calls,
-                    step=_step + 1,
-                )
-                self.logger.log_usage(
-                    "llm_usage",
-                    self._usage(response, messages, content, tool_calls),
-                    model=self.config.model,
-                    step=_step + 1,
-                )
-            if not tool_calls:
-                final = content
-                break
-
-            messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
-            pending_images: list[tuple[str, str]] = []
-            for call in tool_calls:
-                output, images = self._run_tool(call["name"], call.get("arguments", {}))
-                messages.append(
-                    Message(
-                        role="tool",
-                        content=f"[{call['name']}]\n{output}",
-                        tool_call_id=call["id"],
+                    self.logger.log_conversation(
+                        "assistant_message",
+                        content=content,
+                        tool_calls=tool_calls,
+                        step=_step + 1,
                     )
-                )
-                pending_images.extend((call["name"], uri) for uri in images)
-            # Tool messages cannot carry images in the OpenAI chat format, so image
-            # outputs are forwarded in a follow-up user message after all tool replies.
-            if pending_images:
-                blocks: list[dict[str, Any]] = []
-                for name, uri in pending_images:
-                    blocks.append({"type": "text", "text": f"Image output from {name}:"})
-                    blocks.append({"type": "image_url", "image_url": {"url": uri}})
-                messages.append(Message(role="user", content=blocks))
-        else:
-            final = f"Stopped after {self.config.max_tool_steps} tool step(s)."
+                    self.logger.log_usage(
+                        "llm_usage",
+                        self._usage(response, messages, content, tool_calls),
+                        model=self.config.model,
+                        step=_step + 1,
+                    )
+                if not tool_calls:
+                    final = content
+                    break
+
+                messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+                pending_images: list[tuple[str, str]] = []
+                stopped = False
+                for call in tool_calls:
+                    if stopped or self.stop.triggered:
+                        # Fill remaining tool calls with a stop result so the
+                        # conversation stays well-formed for the next turn.
+                        stopped = True
+                        if self.logger:
+                            self.logger.log_tool(
+                                "tool_stopped", tool=call["name"], arguments=call.get("arguments", {})
+                            )
+                        messages.append(
+                            Message(
+                                role="tool",
+                                content=f"[{call['name']}]\nStopped by user (hotkey {self.stop.hotkey}).",
+                                tool_call_id=call["id"],
+                            )
+                        )
+                        continue
+                    output, images = self._run_tool(call["name"], call.get("arguments", {}))
+                    messages.append(
+                        Message(
+                            role="tool",
+                            content=f"[{call['name']}]\n{output}",
+                            tool_call_id=call["id"],
+                        )
+                    )
+                    pending_images.extend((call["name"], uri) for uri in images)
+                if stopped:
+                    final = self._stop_message()
+                    break
+                # Tool messages cannot carry images in the OpenAI chat format, so image
+                # outputs are forwarded in a follow-up user message after all tool replies.
+                if pending_images:
+                    blocks: list[dict[str, Any]] = []
+                    for name, uri in pending_images:
+                        blocks.append({"type": "text", "text": f"Image output from {name}:"})
+                        blocks.append({"type": "image_url", "image_url": {"url": uri}})
+                    messages.append(Message(role="user", content=blocks))
+            else:
+                final = f"Stopped after {self.config.max_tool_steps} tool step(s)."
+        finally:
+            self.stop.disarm()
 
         if not final:
             final = "(no response)"
@@ -126,17 +160,22 @@ class Agent:
             )
         return [call for call in normalized if call["name"]]
 
+    def _stop_message(self) -> str:
+        return f"Stopped by user (hotkey {self.stop.hotkey})."
+
     def _run_tool(self, name: str, arguments: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
         if name not in self.tools.names():
             if self.logger:
                 self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
             return f"Unknown tool: {name}", ()
         tool = self.tools.get(name)
-        if self.config.require_confirmation and tool.requires_confirmation:
+        if self.config.require_confirmation and tool.requires_confirmation and not self._session_approved:
             if not self.confirm(name, arguments):
                 if self.logger:
                     self.logger.log_tool("tool_cancelled", tool=name, arguments=arguments)
                 return "Cancelled by user.", ()
+            # Session-wide approval: don't prompt again for the rest of the session.
+            self._session_approved = True
         context = ToolContext(
             workspace=self.config.workspace,
             require_confirmation=self.config.require_confirmation,

@@ -17,6 +17,10 @@ screen = [
   "mss>=9.0",
   "Pillow>=10.0",
 ]
+control = [
+  "pyautogui>=0.9.54",
+  "pynput>=1.7",
+]
 
 [project.scripts]
 little-agent = "little_agent.cli:main"

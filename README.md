@@ -207,6 +207,7 @@ Agentが従う手順や注意点。
 - `datetime`: 現在日時・曜日・タイムゾーンの取得
 - `git`: gitリポジトリの状態確認・差分・コミット
 - `screen_capture`: PC画面のスクリーンショット取得とVisionによる画面説明
+- `computer_use`: マウス/キーボードによるPC操作（クリック、文字入力、キー操作）
 
 Skill選択は軽量なキーワードスコアリングです。将来的にはembedding検索やLLMによるSkill routingに差し替えられます。
 
@@ -364,6 +365,43 @@ pip install mss Pillow
 - `Message.content` を文字列に加えて content-block のリストでも持てるよう拡張
 - Tool実行後、`tool` メッセージ（テキスト）に続けて、画像を `image_url` ブロックとして持つ `user` メッセージを追加してモデルに渡す（OpenAI形式では `tool` メッセージに画像を入れられないため）
 - Skill Script Toolは標準出力JSONに `images` 配列（data URI）を返すことで画像を渡せる
+
+### PC操作Skill（computer_use）
+
+`skills/computer_use` は、マウスとキーボードで実機を操作するSkillです。`screen_capture` で画面を「見て」、このSkillで「操作」します（見る→操作→見る のループ）。
+
+| Tool | 内容 | 確認 |
+| --- | --- | --- |
+| `get_screen_info` | 実画面解像度とカーソル位置を返す | 不要 |
+| `move_mouse` | カーソルを指定座標へ移動 | 不要 |
+| `click` | クリック（left/right/middle、複数回、座標指定可） | 必要 |
+| `type_text` | 文字列をキーボード入力 | 必要 |
+| `press_keys` | キー/ホットキー（`enter`、`ctrl+c` 等） | 必要 |
+
+セットアップ:
+
+```powershell
+pip install pyautogui
+```
+
+座標の扱い:
+
+- 座標は **実画面ピクセル** で渡します。
+- `take_screenshot` の画像が縮小されている場合（例: `Captured screen 1568x882`）、その画像上で読み取った座標に `image_size`（例 `[1568, 882]`）を添えて渡すと、**ツール側が実解像度へ自動変換**します（モデルに座標計算をさせません）。
+
+#### 承認と緊急停止
+
+AIのマウス/キーボード操作とユーザーの操作が同じカーソルを奪い合わないよう、承認は次の方式です。
+
+- **セッション一括承認**: 確認が必要なTool（`click` / `type_text` / `press_keys` など）を最初に実行するとき一度だけ確認します。承認すると **そのセッション中は再確認なし** で連続実行します。これにより「ターミナルを前面化して `y/N` を打つためのマウス操作」が不要になり、AI操作との干渉が消えます。
+- **緊急停止ホットキー**: AIが操作している間だけ有効なグローバルホットキー（既定 `Ctrl+Alt+Q`、`LITTLE_AGENT_STOP_HOTKEY` で変更可）。押すとTool実行の合間で中断し、`>` プロンプトに戻ります。プロンプト待機中はリスナーを張らないので普段の操作には干渉しません。
+- **即時停止(failsafe)**: マウスを画面の隅へ動かすと、操作の途中でも pyautogui が即アボートします。
+- 停止ホットキーには `pynput` が必要です（`pip install pynput`）。未導入でも failsafe と `Ctrl+C` は使えます。
+
+制限・安全:
+
+- GUIセッションが必要です。ヘッドレス環境では操作できません。
+- 日本語など非ASCIIは `type_text` で正しく入らないことがあります。
 
 ## テスト
 

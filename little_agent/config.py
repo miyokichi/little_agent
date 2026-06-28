@@ -29,6 +29,7 @@ class AgentConfig:
     log_dir: Path | None = None
     llm_timeout_seconds: int = 60
     global_memory_path: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "memory.md")
+    stop_hotkey: str = "<ctrl>+<alt>+q"
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -50,4 +51,5 @@ class AgentConfig:
             log_dir=log_dir,
             llm_timeout_seconds=int(os.getenv("LITTLE_AGENT_TIMEOUT_SECONDS", "60")),
             global_memory_path=global_memory_path,
+            stop_hotkey=os.getenv("LITTLE_AGENT_STOP_HOTKEY", "<ctrl>+<alt>+q"),
         )
