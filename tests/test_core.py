@@ -268,9 +268,11 @@ class CoreTests(unittest.TestCase):
             conversation_log = log_dir / "conversations" / f"{session_id}.jsonl"
             tool_log = log_dir / "tools" / f"{session_id}.jsonl"
             usage_log = log_dir / "usage" / f"{session_id}.jsonl"
-            conversation_events = [json.loads(line)["event"] for line in conversation_log.read_text().splitlines()]
-            tool_events = [json.loads(line)["event"] for line in tool_log.read_text().splitlines()]
-            usage_records = [json.loads(line) for line in usage_log.read_text().splitlines()]
+            conversation_events = [
+                json.loads(line)["event"] for line in conversation_log.read_text(encoding="utf-8").splitlines()
+            ]
+            tool_events = [json.loads(line)["event"] for line in tool_log.read_text(encoding="utf-8").splitlines()]
+            usage_records = [json.loads(line) for line in usage_log.read_text(encoding="utf-8").splitlines()]
         finally:
             for path in (log_dir / "conversations").glob("*.jsonl"):
                 path.unlink(missing_ok=True)
@@ -308,6 +310,13 @@ class CoreTests(unittest.TestCase):
         self.assertIn("git_add", names)
         self.assertIn("git_commit", names)
         self.assertIn("take_screenshot", names)
+        self.assertIn("create_workflow", names)
+        self.assertIn("add_workflow_task", names)
+        self.assertIn("update_task_status", names)
+        self.assertIn("show_workflow", names)
+        self.assertIn("list_workflows", names)
+        self.assertIn("delete_workflow", names)
+        self.assertIn("open_workflow_viewer", names)
 
     def test_default_tools_do_not_include_portable_task_manager_tools(self) -> None:
         names = default_tools().names()
@@ -445,6 +454,182 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(read.ok)
         self.assertIn("Roadmap", read.content)
         self.assertIn("Build skills", read.content)
+
+    @staticmethod
+    def _workflow_tools(workspace: Path) -> tuple[ToolContext, ToolRegistry]:
+        context = ToolContext(workspace=workspace)
+        tools = ToolRegistry()
+        for tool in SkillLoader(Path("skills").resolve()).load_tools():
+            tools.register(tool)
+        return context, tools
+
+    @staticmethod
+    def _cleanup_workflow_workspace(workspace: Path) -> None:
+        for name in ("workflows.json", "workflows.json.lock", "workflows.json.tmp"):
+            (workspace / "data" / name).unlink(missing_ok=True)
+        with suppress(OSError):
+            (workspace / "data").rmdir()
+        with suppress(OSError):
+            workspace.rmdir()
+
+    def test_workflow_tools_create_update_and_show(self) -> None:
+        workspace = (Path.cwd() / ".test-workflow-workspace").resolve()
+        context, tools = self._workflow_tools(workspace)
+
+        try:
+            created = tools.get("create_workflow").run(
+                context,
+                title="Release prep",
+                goal="Ship v1",
+                tasks=[
+                    {"key": "t1", "title": "Draft the report", "assignee": "ai"},
+                    {"key": "t2", "title": "Review the report", "assignee": "human", "depends_on": ["t1"]},
+                ],
+            )
+            stored = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
+            workflow = stored["workflows"][0]
+            task_ids = [task["id"] for task in workflow["tasks"]]
+            updated = tools.get("update_task_status").run(
+                context, task_id=task_ids[0], status="done", result="Saved draft.md"
+            )
+            shown = tools.get("show_workflow").run(context, workflow_id=workflow["id"])
+        finally:
+            self._cleanup_workflow_workspace(workspace)
+
+        self.assertTrue(created.ok)
+        self.assertEqual([len(task_id) for task_id in task_ids], [8, 8])
+        self.assertEqual(workflow["tasks"][1]["depends_on"], [task_ids[0]])
+        self.assertEqual(workflow["tasks"][1]["assignee"], "human")
+        self.assertTrue(updated.ok)
+        self.assertIn(f"READY: {task_ids[1]}(human)", updated.content)
+        self.assertTrue(shown.ok)
+        self.assertIn("<- READY", shown.content)
+
+    def test_workflow_create_rejects_invalid_input(self) -> None:
+        workspace = (Path.cwd() / ".test-workflow-invalid-workspace").resolve()
+        context, tools = self._workflow_tools(workspace)
+
+        try:
+            cyclic = tools.get("create_workflow").run(
+                context,
+                title="Cyclic",
+                tasks=[
+                    {"key": "a", "title": "A", "assignee": "ai", "depends_on": ["b"]},
+                    {"key": "b", "title": "B", "assignee": "ai", "depends_on": ["a"]},
+                ],
+            )
+            unknown_dep = tools.get("create_workflow").run(
+                context,
+                title="Unknown dep",
+                tasks=[{"key": "a", "title": "A", "assignee": "ai", "depends_on": ["missing"]}],
+            )
+            bad_assignee = tools.get("create_workflow").run(
+                context,
+                title="Bad assignee",
+                tasks=[{"key": "a", "title": "A", "assignee": "robot"}],
+            )
+            file_created = (workspace / "data" / "workflows.json").exists()
+        finally:
+            self._cleanup_workflow_workspace(workspace)
+
+        self.assertFalse(cyclic.ok)
+        self.assertIn("cycle", cyclic.content.lower())
+        self.assertFalse(unknown_dep.ok)
+        self.assertIn("unknown key", unknown_dep.content)
+        self.assertFalse(bad_assignee.ok)
+        self.assertIn("assignee", bad_assignee.content)
+        self.assertFalse(file_created)
+
+    def test_workflow_viewer_serves_state_and_completes_human_task(self) -> None:
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from little_agent.viewer import make_server
+
+        workspace = (Path.cwd() / ".test-workflow-viewer-workspace").resolve()
+        context, tools = self._workflow_tools(workspace)
+
+        def post_complete(port: int, workflow_id: str, task_id: str) -> int:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/complete",
+                data=json.dumps({"workflow_id": workflow_id, "task_id": task_id}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status
+            except urllib.error.HTTPError as error:
+                return error.code
+
+        server = None
+        try:
+            tools.get("create_workflow").run(
+                context,
+                title="Viewer flow",
+                tasks=[
+                    {"key": "t1", "title": "Prepare", "assignee": "ai"},
+                    {"key": "t2", "title": "Approve", "assignee": "human", "depends_on": ["t1"]},
+                    {"key": "t3", "title": "Send", "assignee": "ai", "depends_on": ["t2"]},
+                ],
+            )
+            stored = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
+            workflow = stored["workflows"][0]
+            ids = [task["id"] for task in workflow["tasks"]]
+            tools.get("update_task_status").run(context, task_id=ids[0], status="done")
+
+            server = make_server(workspace, 0)
+            port = server.server_address[1]
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=5) as response:
+                state = json.loads(response.read().decode("utf-8"))
+            ready_flags = {task["id"]: task["ready"] for task in state["workflows"][0]["tasks"]}
+
+            ai_rejected = post_complete(port, workflow["id"], ids[0])
+            blocked_rejected = post_complete(port, workflow["id"], ids[2])
+            human_completed = post_complete(port, workflow["id"], ids[1])
+            stored_after = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
+            human_task = stored_after["workflows"][0]["tasks"][1]
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            self._cleanup_workflow_workspace(workspace)
+
+        self.assertEqual(state["app"], "little-agent-viewer")
+        self.assertEqual(ready_flags, {ids[0]: False, ids[1]: True, ids[2]: False})
+        self.assertEqual(ai_rejected, 409)
+        self.assertEqual(blocked_rejected, 409)
+        self.assertEqual(human_completed, 200)
+        self.assertEqual(human_task["status"], "done")
+        self.assertEqual(human_task["completed_via"], "viewer")
+
+    def test_workflow_update_breaks_stale_lock(self) -> None:
+        import os
+        import time
+
+        workspace = (Path.cwd() / ".test-workflow-lock-workspace").resolve()
+        context, tools = self._workflow_tools(workspace)
+
+        try:
+            tools.get("create_workflow").run(
+                context,
+                title="Locked",
+                tasks=[{"key": "t1", "title": "Only task", "assignee": "ai"}],
+            )
+            stored = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
+            task_id = stored["workflows"][0]["tasks"][0]["id"]
+            lock_path = workspace / "data" / "workflows.json.lock"
+            lock_path.write_text("", encoding="utf-8")
+            stale = time.time() - 60
+            os.utime(lock_path, (stale, stale))
+            updated = tools.get("update_task_status").run(context, task_id=task_id, status="done")
+        finally:
+            self._cleanup_workflow_workspace(workspace)
+
+        self.assertTrue(updated.ok)
 
 
 if __name__ == "__main__":

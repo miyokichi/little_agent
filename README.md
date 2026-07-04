@@ -158,6 +158,57 @@ skills/<skill_name>/
 
 削除は元に戻せないため、`delete_task` のみ実行前確認が必要です。
 
+### ワークフロー管理仕様（AI+人間統合）
+
+`skills/workflow` は、ゴールを **AIタスクと人間タスクの依存関係付きワークフロー（DAG）** として管理するポータブルSkillです。task_manager が単発TODO向けなのに対し、workflow は「AIが下書き → 人間がレビュー → AIが送信」のような複数タスクの進行管理に使います。
+
+| Tool | 内容 | 確認 |
+| --- | --- | --- |
+| `create_workflow` | タスクDAGを一括登録（依存参照は呼び出し内の一時キー） | 不要 |
+| `add_workflow_task` | 既存ワークフローにタスクを追加 | 不要 |
+| `update_task_status` | タスクの状態と結果を記録 | 不要 |
+| `show_workflow` | 詳細と着手可能（READY）タスクを表示 | 不要 |
+| `list_workflows` | 一覧と進捗を表示 | 不要 |
+| `delete_workflow` | ワークフローを削除 | 必要 |
+| `open_workflow_viewer` | ブラウザのビューアを起動 | 不要 |
+
+データは `data/workflows.json` に保存されます。主なフィールド:
+
+- workflow: `id`（8桁）、`title`、`goal`、`status`（`active` / `done`。全タスク完了で自動的に `done`）
+- task: `id`（8桁）、`title`、`description`、`assignee`（`ai` / `human`）、`status`（`pending` / `running` / `done` / `failed` / `skipped`）、`depends_on`（タスクIDの配列）、`result`（成果の要約）、`completed_via`（`agent` / `viewer`）
+
+状態のルール:
+
+- **ready（着手可能）**: `pending` かつ `depends_on` がすべて `done` または `skipped`。保存されず、表示時に導出されます。
+- AIタスクは、エージェントが作業の前後で `running` → `done`（+ `result`）を記録します。失敗時は `failed` と理由を記録します。
+- 人間タスクは承認ゲートとして機能します。ビューアの「完了にする」ボタンで完了させると、下流のタスクが ready になります。ビューアからの完了は「human かつ pending かつ ready」のタスクのみ許可されます。
+- エージェントとビューアの同時書き込みは、`data/workflows.json.lock` による排他と一時ファイル + `os.replace` によるatomic writeで保護されます。
+
+### ワークフロービューア
+
+`data/workflows.json` をブラウザで可視化するローカルWeb UIです（標準ライブラリのみ、追加依存なし）。
+
+起動方法は2つ:
+
+```powershell
+# 手動起動
+python -m little_agent.viewer --workspace . --port 8765
+```
+
+```text
+# または会話から
+> ワークフローのビューアを開いて
+```
+
+- URL: `http://127.0.0.1:8765/`（`LITTLE_AGENT_VIEWER_PORT` で変更可）
+- 表示: ワークフローのDAG図（Mermaid。ステータス色分け、AI=矩形 / 人間=平行四辺形、readyな人間タスクは琥珀色で強調）、「あなた待ち」パネル（readyな人間タスクと完了ボタン）、タスク詳細、全タスク一覧
+- 約1.5秒間隔のポーリングで、エージェントの進捗がライブ反映されます
+- バインドは `127.0.0.1` のみで、外部からはアクセスできません
+- Mermaid はCDNから読み込みます。オフライン時は図の代わりに依存関係付きリスト表示へ自動フォールバックします（完了操作などの機能はオフラインでも動作します）
+- 停止は、手動起動なら `Ctrl+C`。会話から起動した場合はバックグラウンド常駐なので、タスクマネージャで該当の `python` プロセスを終了します
+
+注意: APIキーなしのローカルフォールバック（LocalRuleClient）はworkflow系Toolを呼ばないため、このSkillはOpenAI互換APIの設定時のみ実質的に使えます。
+
 ### PowerShell実行の安全仕様
 
 `run_powershell` はワークスペースをカレントディレクトリとして実行します。以下のような破壊的・危険なトークンを含むコマンドは簡易ガードでブロックします。
@@ -201,6 +252,7 @@ Agentが従う手順や注意点。
 - `python_coder`: Python実装・調査・実行確認
 - `windows_operator`: Windows/PowerShell操作
 - `task_manager`: タスク、TODO、やることリストの管理
+- `workflow`: AIタスクと人間タスクを依存関係付きワークフロー（DAG）として管理・可視化
 - `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証
 - `excel_file`: `.xlsx` の読み取りと簡易作成
 - `ppt_file`: `.pptx` のテキスト読み取りと簡易作成
@@ -260,6 +312,9 @@ little-agent
 > PowerShellでPythonのバージョンを確認して
 > 明日までに請求書を確認するタスクを追加して
 > 未完了タスクを見せて
+> 新製品発表の準備をワークフローにして。私のレビューを間に挟んで
+> ワークフローのビューアを開いて
+> 資料収集が終わったので done にして
 > reports/sales.xlsx の中身を読んで
 > 箇条書きから deck/plan.pptx を作って
 ```
@@ -437,5 +492,6 @@ python -m pytest -q
 - 会話ログの保存
 - Skillのembedding検索
 - 許可制PowerShell runner
-- GUIまたはWeb UI
+- GUIまたはWeb UI（ワークフロービューアは実装済み。汎用の会話UIは未実装）
+- readyなAIタスクをエージェントが順に自動実行するワークフローのオーケストレーション
 - 複数agentのrole分担

@@ -1,0 +1,130 @@
+{
+  "tools": [
+    {
+      "name": "create_workflow",
+      "description": "Create a workflow in data/workflows.json by registering the whole task DAG (AI and human tasks with dependencies) in one call.",
+      "script": "scripts/workflow_tool.py",
+      "requires_confirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "description": "Workflow title." },
+          "goal": { "type": "string", "description": "Optional goal or deadline context." },
+          "tasks": {
+            "type": "array",
+            "description": "All tasks of the workflow. Reference other tasks in this call by their temporary 'key'.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": { "type": "string", "description": "Temporary key used only inside this call to reference dependencies. Example: t1" },
+                "title": { "type": "string", "description": "Task title." },
+                "description": { "type": "string", "description": "Optional details about what to do." },
+                "assignee": { "type": "string", "enum": ["ai", "human"], "description": "Who performs the task: the agent (ai) or the user (human)." },
+                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Keys of tasks that must finish first." }
+              },
+              "required": ["key", "title", "assignee"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["title", "tasks"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "add_workflow_task",
+      "description": "Add one task to an existing workflow. depends_on must use real task ids from that workflow.",
+      "script": "scripts/workflow_tool.py",
+      "requires_confirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "workflow_id": { "type": "string", "description": "Target workflow id. Defaults to the only active workflow." },
+          "title": { "type": "string", "description": "Task title." },
+          "description": { "type": "string", "description": "Optional details about what to do." },
+          "assignee": { "type": "string", "enum": ["ai", "human"], "description": "Who performs the task." },
+          "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Existing task ids that must finish first." }
+        },
+        "required": ["title", "assignee"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_task_status",
+      "description": "Record a task's status transition (pending/running/done/failed/skipped) and an optional result summary.",
+      "script": "scripts/workflow_tool.py",
+      "requires_confirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "workflow_id": { "type": "string", "description": "Workflow id. Optional; the task is searched across workflows when omitted." },
+          "task_id": { "type": "string", "description": "Task id to update." },
+          "status": { "type": "string", "enum": ["pending", "running", "done", "failed", "skipped"], "description": "New status." },
+          "result": { "type": "string", "description": "Short outcome summary recorded with done/failed." }
+        },
+        "required": ["task_id", "status"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "show_workflow",
+      "description": "Show one workflow with all tasks, dependencies, and which tasks are READY to start.",
+      "script": "scripts/workflow_tool.py",
+      "requires_confirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "workflow_id": { "type": "string", "description": "Workflow id. Defaults to the only active workflow." }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_workflows",
+      "description": "List workflows with progress (done/total tasks and ready count). Can filter by status.",
+      "script": "scripts/workflow_tool.py",
+      "requires_confirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Filter status: active, done, or all.",
+            "enum": ["active", "done", "all"],
+            "default": "active"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_workflow",
+      "description": "Delete a workflow and all of its tasks by workflow id.",
+      "script": "scripts/workflow_tool.py",
+      "requires_confirmation": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "workflow_id": { "type": "string", "description": "Workflow id to delete." }
+        },
+        "required": ["workflow_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_workflow_viewer",
+      "description": "Start the local workflow viewer (http://127.0.0.1:8765/) if needed and open it in the browser.",
+      "script": "scripts/workflow_tool.py",
+      "requires_confirmation": false,
+      "timeout_seconds": 20,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "port": { "type": "integer", "description": "Viewer port. Defaults to LITTLE_AGENT_VIEWER_PORT or 8765." },
+          "workflow_id": { "type": "string", "description": "Open the viewer focused on this workflow." }
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}
