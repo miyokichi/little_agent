@@ -35,7 +35,7 @@ def main() -> None:
     print(f"Little Agent ({mode})")
     print(f"Workspace: {config.workspace}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
-    print("Type /exit to quit.\n")
+    print("Type /exit to quit. /remember saves what was learned so far.\n")
 
     while True:
         try:
@@ -47,6 +47,20 @@ def main() -> None:
             continue
         if user_text in {"/exit", "/quit"}:
             break
+        if user_text == "/remember":
+            print("[memory] learned from this session." if agent.remember() else "[memory] nothing new to learn.")
+            print()
+            continue
         print(agent.run(user_text))
         print()
+
+    _end_session(agent)
+
+
+def _end_session(agent: Agent) -> None:
+    try:
+        if agent.end_session():
+            print("[memory] learned from this session.")
+    except Exception as exc:  # noqa: BLE001 - never let auto-learning break exit.
+        print(f"[memory] auto-learning skipped: {exc}")
 

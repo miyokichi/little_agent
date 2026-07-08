@@ -30,6 +30,8 @@ class AgentConfig:
     llm_timeout_seconds: int = 60
     global_memory_path: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "memory.md")
     stop_hotkey: str = "<ctrl>+<alt>+q"
+    global_profile_path: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "profile.md")
+    enable_auto_learning: bool = True
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -40,6 +42,8 @@ class AgentConfig:
         log_dir = log_dir.resolve()
         raw_global_memory = os.getenv("LITTLE_AGENT_GLOBAL_MEMORY_PATH")
         global_memory_path = Path(raw_global_memory).resolve() if raw_global_memory else Path.home() / ".little_agent" / "memory.md"
+        raw_global_profile = os.getenv("LITTLE_AGENT_GLOBAL_PROFILE_PATH")
+        global_profile_path = Path(raw_global_profile).resolve() if raw_global_profile else Path.home() / ".little_agent" / "profile.md"
         return cls(
             model=os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini"),
             workspace=workspace,
@@ -52,4 +56,6 @@ class AgentConfig:
             llm_timeout_seconds=int(os.getenv("LITTLE_AGENT_TIMEOUT_SECONDS", "60")),
             global_memory_path=global_memory_path,
             stop_hotkey=os.getenv("LITTLE_AGENT_STOP_HOTKEY", "<ctrl>+<alt>+q"),
+            global_profile_path=global_profile_path,
+            enable_auto_learning=_as_bool(os.getenv("LITTLE_AGENT_AUTO_LEARNING"), True),
         )

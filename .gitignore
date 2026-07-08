@@ -12,4 +12,8 @@ data/workflows.json*
 .test-*/
 logs/
 
+# Runtime memory/profile artifacts (workspace-level)
+memory.md
+profile.md
+
 *.png
