@@ -119,6 +119,7 @@ def viewer_create_task(workspace: Path, payload: dict[str, Any]) -> tuple[bool, 
             "title": title,
             "description": str(payload.get("description") or "").strip(),
             "assignee": assignee,
+            "assignee_name": str(payload.get("assignee_name") or "").strip() if assignee == "human" else "",
             "status": "pending",
             "depends_on": depends_on,
             "due": str(payload.get("due") or "").strip(),
@@ -158,6 +159,10 @@ def viewer_update_task(workspace: Path, payload: dict[str, Any]) -> tuple[bool, 
             if assignee not in ASSIGNEES:
                 return False, f"担当が不正です: {assignee}"
             task["assignee"] = assignee
+            if assignee == "ai":
+                task["assignee_name"] = ""  # a person's name only applies to human tasks
+        if "assignee_name" in payload:
+            task["assignee_name"] = str(payload.get("assignee_name") or "").strip()
         for field in ("title", "description", "due", "priority", "result"):
             if field in payload:
                 value = str(payload.get(field) or "").strip()
@@ -406,6 +411,8 @@ def _project_from_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
         migrated = dict(task)
         migrated.setdefault("due", "")
         migrated.setdefault("priority", "")
+        migrated.setdefault("assignee_name", "")
+        migrated.setdefault("comments", [])
         migrated.setdefault("created_via", "agent")
         tasks.append(migrated)
     return {
@@ -432,6 +439,7 @@ def _inbox_from_legacy_tasks(old_tasks: list[Any]) -> dict[str, Any]:
                 "title": str(old.get("title") or "(untitled)"),
                 "description": str(old.get("notes") or ""),
                 "assignee": "human",
+                "assignee_name": "",
                 "status": status,
                 "depends_on": [],
                 "due": str(old.get("due") or ""),
@@ -733,6 +741,7 @@ dialog textarea { min-height:60px; resize:vertical; }
         <option value="ai">🤖 AI</option>
       </select>
     </label>
+    <label id="f-assignee-name-row">担当者名(任意)<input id="f-assignee-name" placeholder="例: 山田さん"></label>
     <label id="f-status-row">状態
       <select id="f-status">
         <option value="pending">pending</option>
@@ -792,6 +801,10 @@ if (window.mermaid) {
 
 function connOk(ok) { $('conn').classList.toggle('bad', !ok); }
 function isFinished(t) { return t.status === 'done' || t.status === 'skipped'; }
+function assigneeLabel(t) {
+  if (t.assignee === 'human') return '👤 ' + ((t.assignee_name || '').trim() || '人間');
+  return '🤖 AI';
+}
 
 async function post(url, body) {
   const res = await fetch(url, {
@@ -880,7 +893,7 @@ function renderWaiting(proj) {
     card.className = 'waiting-item';
     const title = document.createElement('div');
     title.className = 't';
-    title.textContent = '👤 ' + t.title;
+    title.textContent = assigneeLabel(t) + ': ' + t.title;
     card.appendChild(title);
     if (t.description) {
       const desc = document.createElement('div');
@@ -926,7 +939,7 @@ function renderTable(proj) {
     if (t.id === selectedTaskId) tr.className = 'sel';
     const cells = [
       t.id,
-      t.assignee === 'human' ? '👤 人間' : '🤖 AI',
+      assigneeLabel(t),
       null,
       t.title,
       t.due || '-',
@@ -978,7 +991,7 @@ function renderDetail(proj) {
     dl.appendChild(dd);
   };
   add('タイトル', t.title);
-  add('担当 / 状態', (t.assignee === 'human' ? '👤 人間' : '🤖 AI') + ' / ' + t.status + (t.ready ? ' (着手可能)' : ''));
+  add('担当 / 状態', assigneeLabel(t) + ' / ' + t.status + (t.ready ? ' (着手可能)' : ''));
   add('説明', t.description);
   add('期限', t.due);
   add('優先度', t.priority);
@@ -1064,11 +1077,13 @@ function openTaskDialog(taskId) {
   $('f-title').value = t ? t.title : '';
   $('f-desc').value = t ? (t.description || '') : '';
   $('f-assignee').value = t ? t.assignee : 'human';
+  $('f-assignee-name').value = t ? (t.assignee_name || '') : '';
   $('f-status-row').hidden = !t;
   $('f-status').value = t ? t.status : 'pending';
   $('f-due').value = t ? (t.due || '') : '';
   $('f-priority').value = t ? (t.priority || '') : '';
   $('btn-del-task').hidden = !t;
+  syncAssigneeNameRow();
   const deps = new Set(t ? (t.depends_on || []) : []);
   const box = $('f-deps');
   box.innerHTML = '';
@@ -1081,21 +1096,28 @@ function openTaskDialog(taskId) {
     cb.value = other.id;
     cb.checked = deps.has(other.id);
     label.appendChild(cb);
-    label.appendChild(document.createTextNode((other.assignee === 'human' ? '👤 ' : '🤖 ') + other.title));
+    label.appendChild(document.createTextNode(assigneeLabel(other) + ' ' + other.title));
     box.appendChild(label);
   }
   $('task-dlg').showModal();
+}
+
+function syncAssigneeNameRow() {
+  // Only human tasks can carry a person's name.
+  $('f-assignee-name-row').hidden = $('f-assignee').value !== 'human';
 }
 
 async function saveTaskDialog(event) {
   event.preventDefault();
   const proj = currentProj();
   if (!proj) return;
+  const isHuman = $('f-assignee').value === 'human';
   const body = {
     project_id: proj.id,
     title: $('f-title').value.trim(),
     description: $('f-desc').value.trim(),
     assignee: $('f-assignee').value,
+    assignee_name: isHuman ? $('f-assignee-name').value.trim() : '',
     due: $('f-due').value.trim(),
     priority: $('f-priority').value,
     depends_on: Array.from($('f-deps').querySelectorAll('input:checked')).map(cb => cb.value)
@@ -1175,7 +1197,8 @@ function mermaidLabel(text) {
 function mermaidText(proj) {
   const lines = ['flowchart TD'];
   for (const t of proj.tasks) {
-    const label = '"' + (t.assignee === 'human' ? '👤 ' : '🤖 ') + mermaidLabel(t.title) + '"';
+    const who = t.assignee === 'human' ? ((t.assignee_name || '').trim() ? '👤' + mermaidLabel(t.assignee_name) + ': ' : '👤 ') : '🤖 ';
+    const label = '"' + who + mermaidLabel(t.title) + '"';
     const cls = (t.ready && t.assignee === 'human') ? 'ready' : t.status;
     const node = t.assignee === 'human'
       ? 't_' + t.id + '[/' + label + '/]'
@@ -1232,7 +1255,7 @@ function renderFallback(proj, container) {
   for (const t of proj.tasks) {
     const li = document.createElement('li');
     const deps = (t.depends_on || []).map(d => (byId[d] || { title: d }).title).join(', ');
-    li.textContent = '[' + t.status + '] ' + (t.assignee === 'human' ? '👤' : '🤖') + ' ' + t.title
+    li.textContent = '[' + t.status + '] ' + assigneeLabel(t) + ' ' + t.title
       + (deps ? ' ← 依存: ' + deps : '');
     ul.appendChild(li);
   }
@@ -1256,6 +1279,7 @@ $('proj-select').addEventListener('change', (event) => {
 $('btn-new-proj').addEventListener('click', () => { $('p-title').value = ''; $('p-goal').value = ''; $('proj-dlg').showModal(); });
 $('btn-del-proj').addEventListener('click', deleteCurrentProject);
 $('btn-new-task').addEventListener('click', () => openTaskDialog(null));
+$('f-assignee').addEventListener('change', syncAssigneeNameRow);
 $('task-form').addEventListener('submit', saveTaskDialog);
 $('btn-cancel-task').addEventListener('click', () => $('task-dlg').close());
 $('btn-del-task').addEventListener('click', deleteTaskFromDialog);

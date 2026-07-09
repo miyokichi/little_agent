@@ -96,6 +96,7 @@ def create_project(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]
                 depends_on=[key_to_id[str(dep).strip()] for dep in item.get("depends_on") or []],
                 due=str(item.get("due") or "").strip(),
                 priority=str(item.get("priority") or "").strip(),
+                assignee_name=str(item.get("assignee_name") or "").strip(),
                 task_id=key_to_id[str(item["key"]).strip()],
             )
             for item in items
@@ -161,6 +162,7 @@ def add_task(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
             depends_on=depends_on,
             due=str(arguments.get("due") or "").strip(),
             priority=str(arguments.get("priority") or "").strip(),
+            assignee_name=str(arguments.get("assignee_name") or "").strip(),
         )
         project["tasks"].append(task)
         _refresh_project_status(project)
@@ -185,6 +187,10 @@ def update_task(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
             if assignee not in ASSIGNEES:
                 return {"ok": False, "content": f"Invalid assignee '{assignee}'. Use one of: ai, human."}
             task["assignee"] = assignee
+            if assignee == "ai":
+                task["assignee_name"] = ""  # a person's name only applies to human tasks
+        if "assignee_name" in arguments:
+            task["assignee_name"] = str(arguments.get("assignee_name") or "").strip()
         for field in ("title", "description", "due", "priority"):
             if field in arguments:
                 value = str(arguments.get(field) or "").strip()
@@ -500,6 +506,7 @@ def _new_task(
     depends_on: list[str],
     due: str = "",
     priority: str = "",
+    assignee_name: str = "",
     task_id: str | None = None,
     created_via: str = "agent",
 ) -> dict[str, Any]:
@@ -508,6 +515,7 @@ def _new_task(
         "title": title,
         "description": description,
         "assignee": assignee,
+        "assignee_name": assignee_name if assignee == "human" else "",
         "status": "pending",
         "depends_on": depends_on,
         "due": due,
@@ -626,9 +634,15 @@ def _format_project(project: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _assignee_label(task: dict[str, Any]) -> str:
+    if task.get("assignee") == "human" and str(task.get("assignee_name") or "").strip():
+        return str(task["assignee_name"]).strip()
+    return str(task.get("assignee"))
+
+
 def _format_task(task: dict[str, Any], ready_ids: set[str]) -> str:
     deps = ",".join(task.get("depends_on") or []) or "-"
-    parts = [f"{task.get('id')} [{task.get('assignee')}/{task.get('status')}] {task.get('title')} (deps: {deps})"]
+    parts = [f"{task.get('id')} [{_assignee_label(task)}/{task.get('status')}] {task.get('title')} (deps: {deps})"]
     if task.get("due"):
         parts.append(f"due={task['due']}")
     if task.get("priority"):
@@ -697,6 +711,7 @@ def _project_from_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
         migrated = dict(task)
         migrated.setdefault("due", "")
         migrated.setdefault("priority", "")
+        migrated.setdefault("assignee_name", "")
         migrated.setdefault("comments", [])
         migrated.setdefault("created_via", "agent")
         tasks.append(migrated)
@@ -724,6 +739,7 @@ def _inbox_from_legacy_tasks(old_tasks: list[Any]) -> dict[str, Any]:
                 "title": str(old.get("title") or "(untitled)"),
                 "description": str(old.get("notes") or ""),
                 "assignee": "human",
+                "assignee_name": "",
                 "status": status,
                 "depends_on": [],
                 "due": str(old.get("due") or ""),

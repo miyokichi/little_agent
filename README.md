@@ -155,7 +155,7 @@ skills/<skill_name>/
 データは `data/projects.json` に保存されます。主なフィールド:
 
 - project: `id`（8桁）、`title`、`goal`、`status`（`active` / `done`。全タスク完了で自動的に `done`）、`inbox`（単発TODO受け皿フラグ）
-- task: `id`（8桁）、`title`、`description`、`assignee`（`ai` / `human`）、`status`（`pending` / `running` / `done` / `failed` / `skipped`）、`depends_on`（タスクIDの配列）、`due`、`priority`、`result`（成果の要約）、`comments`（進捗コメントの配列 `{at, via, text}`）、`created_via` / `completed_via`（`agent` / `viewer`。誰が作成/完了したか）
+- task: `id`（8桁）、`title`、`description`、`assignee`（`ai` / `human`）、`assignee_name`（human タスクの担当者名。例: 山田さん。表示用で ai には付かない）、`status`（`pending` / `running` / `done` / `failed` / `skipped`）、`depends_on`（タスクIDの配列）、`due`、`priority`、`result`（成果の要約）、`comments`（進捗コメントの配列 `{at, via, text}`）、`created_via` / `completed_via`（`agent` / `viewer`。誰が作成/完了したか）
 
 状態のルール:
 
@@ -185,7 +185,8 @@ python -m little_agent.viewer --workspace . --port 8765
 
 - URL: `http://127.0.0.1:8765/`（`LITTLE_AGENT_VIEWER_PORT` で変更可）
 - 表示: タスクのDAG図（Mermaid。ステータス色分け、AI=矩形 / 人間=平行四辺形、readyな人間タスクは琥珀色で強調）、「あなた待ち」パネル（readyな人間タスクと完了ボタン）、タスク詳細、全タスク一覧
-- 編集: 「＋プロジェクト」でプロジェクト作成、「＋タスク」でタスク追加、行のダブルクリック（または詳細の「編集」）でタスク編集ダイアログ（タイトル、説明、担当、状態、期限、優先度、依存タスクのチェックボックス）、タスク削除、プロジェクト削除
+- 編集: 「＋プロジェクト」でプロジェクト作成、「＋タスク」でタスク追加、行のダブルクリック（または詳細の「編集」）でタスク編集ダイアログ（タイトル、説明、担当、担当者名、状態、期限、優先度、依存タスクのチェックボックス）、タスク削除、プロジェクト削除
+- 担当者名: human タスクは「担当者名（任意）」に名前（例: 山田さん）を入れると、一覧・図・詳細で「👤 山田さん」と表示されます（担当を AI にすると名前欄は隠れ、値もクリアされます）
 - 進捗コメント: タスク詳細ペインにコメント欄があり、人間（`via=viewer`）とエージェント（`add_task_comment`, `via=agent`）が時系列でメモを残せます。ポーリング再描画中も入力中の下書きは保持されます
 - ビューアからの変更は `created_via` / `completed_via` が `viewer` として記録され、エージェント側は次のターンで `show_project` により最新状態を把握します
 - 約1.5秒間隔のポーリングで、エージェントの進捗がライブ反映されます

@@ -19,7 +19,8 @@
                 "key": { "type": "string", "description": "Temporary key used only inside this call to reference dependencies. Example: t1" },
                 "title": { "type": "string", "description": "Task title." },
                 "description": { "type": "string", "description": "Optional details about what to do." },
-                "assignee": { "type": "string", "enum": ["ai", "human"], "description": "Who performs the task: the agent (ai) or the user (human)." },
+                "assignee": { "type": "string", "enum": ["ai", "human"], "description": "Who performs the task: the agent (ai) or a person (human)." },
+                "assignee_name": { "type": "string", "description": "Optional person's name for a human task, e.g. 山田さん. Display only; the task still behaves as a human task." },
                 "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Keys of tasks that must finish first." },
                 "due": { "type": "string", "description": "Optional due date or due text." },
                 "priority": { "type": "string", "description": "Optional priority such as low, normal, high." }
@@ -45,6 +46,7 @@
           "title": { "type": "string", "description": "Task title." },
           "description": { "type": "string", "description": "Optional details about what to do." },
           "assignee": { "type": "string", "enum": ["ai", "human"], "description": "Who performs the task. Defaults to human." },
+          "assignee_name": { "type": "string", "description": "Optional person's name for a human task, e.g. 山田さん." },
           "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Existing task ids that must finish first." },
           "due": { "type": "string", "description": "Optional due date or due text." },
           "priority": { "type": "string", "description": "Optional priority such as low, normal, high." }
@@ -65,7 +67,8 @@
           "task_id": { "type": "string", "description": "Task id to edit." },
           "title": { "type": "string", "description": "New title." },
           "description": { "type": "string", "description": "New description." },
-          "assignee": { "type": "string", "enum": ["ai", "human"], "description": "New assignee." },
+          "assignee": { "type": "string", "enum": ["ai", "human"], "description": "New assignee. Setting it to ai clears assignee_name." },
+          "assignee_name": { "type": "string", "description": "New person's name for a human task, e.g. 山田さん. Empty string to clear." },
           "due": { "type": "string", "description": "New due date or due text." },
           "priority": { "type": "string", "description": "New priority." },
           "depends_on": { "type": "array", "items": { "type": "string" }, "description": "New full list of dependency task ids." }

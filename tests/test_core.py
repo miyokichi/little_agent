@@ -584,6 +584,44 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(self_dep.ok)
         self.assertEqual(task_a["depends_on"], [])
 
+    def test_assignee_name_for_human_tasks(self) -> None:
+        workspace = (Path.cwd() / ".test-project-name-workspace").resolve()
+        context, tools = self._project_tools(workspace)
+
+        try:
+            tools.get("create_project").run(
+                context,
+                title="Named",
+                tasks=[
+                    {"key": "t1", "title": "Draft", "assignee": "ai"},
+                    {"key": "t2", "title": "Review", "assignee": "human", "assignee_name": "山田さん"},
+                ],
+            )
+            stored = self._read_projects(workspace)
+            ids = [task["id"] for task in stored["projects"][0]["tasks"]]
+            shown = tools.get("show_project").run(context)
+
+            # An ai task must not carry a name.
+            ai_named = tools.get("add_task").run(
+                context, title="Solo", assignee="ai", assignee_name="無視される"
+            )
+            # Renaming and then switching to ai clears the name.
+            renamed = tools.get("update_task").run(context, task_id=ids[1], assignee_name="田中さん")
+            to_ai = tools.get("update_task").run(context, task_id=ids[1], assignee="ai")
+            stored_after = self._read_projects(workspace)
+            tasks_after = {t["id"]: t for t in stored_after["projects"][0]["tasks"]}
+        finally:
+            self._cleanup_project_workspace(workspace)
+
+        review = tasks_after[ids[1]]
+        self.assertEqual(stored["projects"][0]["tasks"][1]["assignee_name"], "山田さん")
+        self.assertIn("[山田さん/pending]", shown.content)
+        self.assertTrue(ai_named.ok)
+        self.assertTrue(renamed.ok)
+        self.assertTrue(to_ai.ok)
+        self.assertEqual(review["assignee"], "ai")
+        self.assertEqual(review["assignee_name"], "")
+
     def test_task_comments_from_agent_and_viewer(self) -> None:
         from little_agent.viewer import viewer_add_comment
 
@@ -755,7 +793,13 @@ class CoreTests(unittest.TestCase):
             task2_status, task2_body = post_json(
                 port,
                 "/api/task/create",
-                {"project_id": project_id, "title": "Step 2", "assignee": "human", "depends_on": [task1_id]},
+                {
+                    "project_id": project_id,
+                    "title": "Step 2",
+                    "assignee": "human",
+                    "assignee_name": "山田さん",
+                    "depends_on": [task1_id],
+                },
             )
             task2_id = task2_body["id"]
             cycle_status, _cycle_body = post_json(
@@ -798,6 +842,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(viewer_task["created_via"], "viewer")
         self.assertEqual([c["text"] for c in viewer_task["comments"]], ["経過メモ"])
         self.assertEqual(viewer_task["comments"][0]["via"], "viewer")
+        human_task = next(task for task in state["projects"][0]["tasks"] if task["id"] == task2_id)
+        self.assertEqual(human_task["assignee_name"], "山田さん")
         ready_flags = {task["id"]: task["ready"] for task in state["projects"][0]["tasks"]}
         self.assertEqual(ready_flags, {task1_id: False, task2_id: True})
         self.assertEqual(delete_status, 200)
