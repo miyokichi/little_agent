@@ -298,6 +298,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("add_task", names)
         self.assertIn("update_task", names)
         self.assertIn("update_task_status", names)
+        self.assertIn("add_task_comment", names)
         self.assertIn("show_project", names)
         self.assertIn("list_projects", names)
         self.assertIn("list_tasks", names)
@@ -583,6 +584,42 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(self_dep.ok)
         self.assertEqual(task_a["depends_on"], [])
 
+    def test_task_comments_from_agent_and_viewer(self) -> None:
+        from little_agent.viewer import viewer_add_comment
+
+        workspace = (Path.cwd() / ".test-project-comment-workspace").resolve()
+        context, tools = self._project_tools(workspace)
+
+        try:
+            tools.get("create_project").run(
+                context,
+                title="Commented",
+                tasks=[{"key": "t1", "title": "Work", "assignee": "ai"}],
+            )
+            stored = self._read_projects(workspace)
+            project_id = stored["projects"][0]["id"]
+            task_id = stored["projects"][0]["tasks"][0]["id"]
+
+            agent_added = tools.get("add_task_comment").run(context, task_id=task_id, text="下書きを開始")
+            viewer_ok, _ = viewer_add_comment(
+                workspace, {"project_id": project_id, "task_id": task_id, "text": "方向性OKです"}
+            )
+            empty_rejected = tools.get("add_task_comment").run(context, task_id=task_id, text="  ")
+            shown = tools.get("show_project").run(context, project_id=project_id)
+            stored_after = self._read_projects(workspace)
+            comments = stored_after["projects"][0]["tasks"][0]["comments"]
+        finally:
+            self._cleanup_project_workspace(workspace)
+
+        self.assertTrue(agent_added.ok)
+        self.assertTrue(viewer_ok)
+        self.assertFalse(empty_rejected.ok)
+        self.assertEqual([c["via"] for c in comments], ["agent", "viewer"])
+        self.assertEqual([c["text"] for c in comments], ["下書きを開始", "方向性OKです"])
+        self.assertTrue(all(c["at"] for c in comments))
+        self.assertIn("comments=2", shown.content)
+        self.assertIn("方向性OKです", shown.content)
+
     def test_delete_task_removes_dangling_dependencies(self) -> None:
         workspace = (Path.cwd() / ".test-project-del-workspace").resolve()
         context, tools = self._project_tools(workspace)
@@ -731,6 +768,11 @@ class CoreTests(unittest.TestCase):
                 "/api/task/update",
                 {"project_id": project_id, "task_id": task1_id, "status": "done", "title": "Step 1 (edited)"},
             )
+            comment_status, _comment_body = post_json(
+                port,
+                "/api/task/comment",
+                {"project_id": project_id, "task_id": task1_id, "text": "経過メモ"},
+            )
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=5) as response:
                 state = json.loads(response.read().decode("utf-8"))
             delete_status, _delete_body = post_json(
@@ -748,11 +790,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual((proj_status, task1_status, task2_status), (200, 200, 200))
         self.assertEqual(cycle_status, 409)
         self.assertEqual(edit_status, 200)
+        self.assertEqual(comment_status, 200)
         viewer_task = next(task for task in state["projects"][0]["tasks"] if task["id"] == task1_id)
         self.assertEqual(viewer_task["status"], "done")
         self.assertEqual(viewer_task["title"], "Step 1 (edited)")
         self.assertEqual(viewer_task["completed_via"], "viewer")
         self.assertEqual(viewer_task["created_via"], "viewer")
+        self.assertEqual([c["text"] for c in viewer_task["comments"]], ["経過メモ"])
+        self.assertEqual(viewer_task["comments"][0]["via"], "viewer")
         ready_flags = {task["id"]: task["ready"] for task in state["projects"][0]["tasks"]}
         self.assertEqual(ready_flags, {task1_id: False, task2_id: True})
         self.assertEqual(delete_status, 200)

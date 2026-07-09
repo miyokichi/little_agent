@@ -92,6 +92,22 @@
       }
     },
     {
+      "name": "add_task_comment",
+      "description": "Append a timestamped progress comment to a task. Use while working on a task to record progress notes.",
+      "script": "scripts/project_tool.py",
+      "requires_confirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": { "type": "string", "description": "Project id. Optional; the task is searched across projects when omitted." },
+          "task_id": { "type": "string", "description": "Task id to comment on." },
+          "text": { "type": "string", "description": "Progress comment text." }
+        },
+        "required": ["task_id", "text"],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "show_project",
       "description": "Show one project with all tasks, dependencies, and which tasks are READY to start.",
       "script": "scripts/project_tool.py",

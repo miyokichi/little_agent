@@ -15,6 +15,7 @@
 - add_task
 - update_task
 - update_task_status
+- add_task_comment
 - show_project
 - list_projects
 - list_tasks
@@ -31,6 +32,7 @@
 - 作成後はタスク一覧(ID付き)を要約して見せ、open_project_viewer でブラウザから確認・編集できることを案内する。
 - タスクの内容変更(タイトル、担当、期限、優先度、依存)は update_task、状態変更は update_task_status を使う。
 - AIタスクを実行するときのプロトコル: 着手直前に update_task_status で running にする → 作業する → 完了直後に done と result(成果の1〜2文)を記録する。失敗したら failed と理由を記録する。
+- 作業が長い・複数段階のタスクでは、節目ごとに add_task_comment で進捗コメント(いま何をしたか、次に何をするか)を残す。人間もビューアからコメントを書けるので、show_project や一覧で新しいコメントを見たら内容を踏まえて動く。
 - 人間もビューアからプロジェクト作成・タスク追加・編集・完了ができる。ビューアで行われた変更は completed_via / created_via が "viewer" になる。次のターンでは最新状態を show_project で確認してから動く。
 - 対象の project_id / task_id が曖昧なときは、先に list_projects や show_project で確認する。
 - delete_task / delete_project は元に戻せないため、確認プロンプトを尊重する。

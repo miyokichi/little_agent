@@ -18,6 +18,7 @@ STATUSES = ("pending", "running", "done", "failed", "skipped")
 ASSIGNEES = ("ai", "human")
 FINISHED_STATUSES = {"done", "skipped"}
 RESULT_MAX_CHARS = 2000
+COMMENT_MAX_CHARS = 2000
 DEFAULT_VIEWER_PORT = 8765
 INBOX_TITLE = "Inbox"
 
@@ -41,6 +42,8 @@ def main() -> int:
             result = update_task(workspace, arguments)
         elif tool == "update_task_status":
             result = update_task_status(workspace, arguments)
+        elif tool == "add_task_comment":
+            result = add_task_comment(workspace, arguments)
         elif tool == "show_project":
             result = show_project(workspace, arguments)
         elif tool == "list_projects":
@@ -236,6 +239,28 @@ def update_task_status(workspace: Path, arguments: dict[str, Any]) -> dict[str, 
         ready_line = ", ".join(f"{t['id']}({t.get('assignee')})" for t in project["tasks"] if t["id"] in ready) or "-"
         content = "\n".join([_format_task(task, ready), *warnings, f"READY: {ready_line}"])
     return {"ok": True, "content": content}
+
+
+def add_task_comment(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(arguments.get("task_id") or "").strip()
+    if not task_id:
+        return {"ok": False, "content": "task_id is required."}
+    text = str(arguments.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "content": "text is required."}
+    text = text[:COMMENT_MAX_CHARS]
+
+    with _locked(workspace):
+        data = _load(workspace)
+        project, task, error = _locate_task(data, arguments.get("project_id"), task_id)
+        if project is None or task is None:
+            return {"ok": False, "content": error}
+        comment = {"at": now(), "via": "agent", "text": text}
+        task.setdefault("comments", []).append(comment)
+        _refresh_project_status(project)
+        _save(workspace, data)
+        count = len(task["comments"])
+    return {"ok": True, "content": f"Added comment #{count} to task {task_id}: {text}"}
 
 
 def show_project(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -488,6 +513,7 @@ def _new_task(
         "due": due,
         "priority": priority,
         "result": "",
+        "comments": [],
         "created_at": now(),
         "created_via": created_via,
         "started_at": None,
@@ -612,6 +638,12 @@ def _format_task(task: dict[str, Any], ready_ids: set[str]) -> str:
         if len(result) > 120:
             result = result[:119] + "…"
         parts.append(f"result: {result}")
+    comments = task.get("comments") or []
+    if comments:
+        latest = str(comments[-1].get("text", ""))
+        if len(latest) > 80:
+            latest = latest[:79] + "…"
+        parts.append(f"comments={len(comments)} (latest: {latest})")
     if task.get("id") in ready_ids:
         parts.append("<- READY")
     return " ".join(parts)
@@ -665,6 +697,7 @@ def _project_from_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
         migrated = dict(task)
         migrated.setdefault("due", "")
         migrated.setdefault("priority", "")
+        migrated.setdefault("comments", [])
         migrated.setdefault("created_via", "agent")
         tasks.append(migrated)
     return {
@@ -696,6 +729,7 @@ def _inbox_from_legacy_tasks(old_tasks: list[Any]) -> dict[str, Any]:
                 "due": str(old.get("due") or ""),
                 "priority": str(old.get("priority") or ""),
                 "result": "",
+                "comments": [],
                 "created_at": str(old.get("created_at") or now()),
                 "created_via": "agent",
                 "started_at": None,

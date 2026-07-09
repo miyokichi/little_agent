@@ -30,6 +30,7 @@ STATUSES = ("pending", "running", "done", "failed", "skipped")
 ASSIGNEES = ("ai", "human")
 FINISHED_STATUSES = {"done", "skipped"}
 MAX_BODY_BYTES = 64 * 1024
+COMMENT_MAX_CHARS = 2000
 DEFAULT_PORT = 8765
 INBOX_TITLE = "Inbox"
 
@@ -123,6 +124,7 @@ def viewer_create_task(workspace: Path, payload: dict[str, Any]) -> tuple[bool, 
             "due": str(payload.get("due") or "").strip(),
             "priority": str(payload.get("priority") or "").strip(),
             "result": "",
+            "comments": [],
             "created_at": now(),
             "created_via": "viewer",
             "started_at": None,
@@ -182,6 +184,30 @@ def viewer_update_task(workspace: Path, payload: dict[str, Any]) -> tuple[bool, 
     return True, "ok"
 
 
+def viewer_add_comment(workspace: Path, payload: dict[str, Any]) -> tuple[bool, str]:
+    """Append a progress comment to a task from the browser."""
+    project_id = str(payload.get("project_id") or "").strip()
+    task_id = str(payload.get("task_id") or "").strip()
+    if not project_id or not task_id:
+        return False, "project_id と task_id は必須です。"
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return False, "コメントを入力してください。"
+    text = text[:COMMENT_MAX_CHARS]
+    with _locked(workspace):
+        data = _load(workspace)
+        project = _project_by_id(data, project_id)
+        if project is None:
+            return False, f"プロジェクトが見つかりません: {project_id}"
+        task = next((t for t in project.get("tasks") or [] if t.get("id") == task_id), None)
+        if task is None:
+            return False, f"タスクが見つかりません: {task_id}"
+        task.setdefault("comments", []).append({"at": now(), "via": "viewer", "text": text})
+        _refresh_project_status(project)
+        _save(workspace, data)
+    return True, "ok"
+
+
 def viewer_delete_task(workspace: Path, payload: dict[str, Any]) -> tuple[bool, str]:
     project_id = str(payload.get("project_id") or "").strip()
     task_id = str(payload.get("task_id") or "").strip()
@@ -211,6 +237,7 @@ _POST_ROUTES = {
     "/api/project/delete": viewer_delete_project,
     "/api/task/create": viewer_create_task,
     "/api/task/update": viewer_update_task,
+    "/api/task/comment": viewer_add_comment,
     "/api/task/delete": viewer_delete_task,
 }
 
@@ -410,6 +437,7 @@ def _inbox_from_legacy_tasks(old_tasks: list[Any]) -> dict[str, Any]:
                 "due": str(old.get("due") or ""),
                 "priority": str(old.get("priority") or ""),
                 "result": "",
+                "comments": [],
                 "created_at": str(old.get("created_at") or now()),
                 "created_via": "agent",
                 "started_at": None,
@@ -619,6 +647,14 @@ aside { display:flex; flex-direction:column; gap:12px; }
 #detail { font-size:13px; }
 #detail dt { color:var(--muted); margin-top:8px; font-size:12px; }
 #detail dd { margin:2px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.comments-title { color:var(--muted); font-size:12px; font-weight:600; margin:12px 0 4px; }
+.comments-list { max-height:180px; overflow:auto; display:flex; flex-direction:column; gap:6px; }
+.comment { background:#f8fafc; border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+.comment .meta { font-size:11px; color:var(--muted); margin-bottom:2px; }
+.comment .body { font-size:13px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.comment-form { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+.comment-form textarea { min-height:48px; resize:vertical; width:100%; }
+.comment-form button { align-self:flex-end; }
 #table-card { margin:0 16px 16px; }
 table { width:100%; border-collapse:collapse; font-size:13px; }
 th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
@@ -926,6 +962,9 @@ function renderDetail(proj) {
   }
   const byId = {};
   for (const x of proj.tasks) byId[x.id] = x;
+  // Preserve a comment draft across the 1.5s poll re-render.
+  const prevInput = document.getElementById('comment-input');
+  const draft = (prevInput && prevInput.dataset.taskId === t.id) ? prevInput.value : '';
   box.innerHTML = '';
   const dl = document.createElement('dl');
   dl.style.margin = '0';
@@ -957,6 +996,63 @@ function renderDetail(proj) {
   btn.style.marginTop = '10px';
   btn.addEventListener('click', () => openTaskDialog(t.id));
   box.appendChild(btn);
+  renderComments(box, proj, t, draft);
+}
+
+function renderComments(box, proj, t, draft) {
+  const title = document.createElement('div');
+  title.className = 'comments-title';
+  const comments = t.comments || [];
+  title.textContent = '進捗コメント (' + comments.length + ')';
+  box.appendChild(title);
+  const list = document.createElement('div');
+  list.className = 'comments-list';
+  if (!comments.length) {
+    list.textContent = 'まだコメントはありません。';
+    list.style.color = 'var(--muted)';
+    list.style.fontSize = '12px';
+  }
+  for (const c of comments) {
+    const item = document.createElement('div');
+    item.className = 'comment';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = (c.via === 'viewer' ? '👤 あなた' : '🤖 エージェント') + ' ・ ' + (c.at || '');
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.textContent = c.text || '';
+    item.appendChild(meta);
+    item.appendChild(body);
+    list.appendChild(item);
+  }
+  box.appendChild(list);
+  if (comments.length) list.scrollTop = list.scrollHeight;
+
+  const form = document.createElement('div');
+  form.className = 'comment-form';
+  const input = document.createElement('textarea');
+  input.id = 'comment-input';
+  input.dataset.taskId = t.id;
+  input.placeholder = '進捗コメントを入力…';
+  input.value = draft || '';
+  const send = document.createElement('button');
+  send.className = 'primary';
+  send.textContent = 'コメントを追加';
+  send.addEventListener('click', async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    try {
+      await post('/api/task/comment', { project_id: proj.id, task_id: t.id, text: text });
+      input.value = '';
+      toast('コメントを追加しました');
+    } catch (err) {
+      toast(err.message);
+    }
+    tick(true);
+  });
+  form.appendChild(input);
+  form.appendChild(send);
+  box.appendChild(form);
 }
 
 function openTaskDialog(taskId) {
