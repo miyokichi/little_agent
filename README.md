@@ -455,6 +455,33 @@ logs/
 
 token数は、OpenAI互換APIが `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` を返す場合はその値を記録します。`usage` が返らない互換APIやローカルフォールバックでは、文字数から概算した値を `estimated: true` として記録します。
 
+### メモリと自動学習
+
+Little Agent には2種類の永続メモリがあります。
+
+**手動メモリ（memory.md）** — LLMが `update_workspace_memory` / `update_global_memory` ツールで明示的に書き込みます。
+
+| ファイル | 範囲 |
+| --- | --- |
+| `{workspace}/memory.md` | そのワークスペース専用 |
+| `~/.little_agent/memory.md`（`LITTLE_AGENT_GLOBAL_MEMORY_PATH`） | 全ワークスペース共通 |
+
+**自動学習プロファイル（profile.md）** — セッションの内容（依頼・成果・傾向）から、恒久的に再利用できる知識を自動抽出して蓄積します。追記ではなく毎回マージ・要約するため、無制限には肥大しません。
+
+| ファイル | 範囲 | 内容 |
+| --- | --- | --- |
+| `{workspace}/profile.md` | ワークスペース | プロジェクト固有のエッセンス・決定・慣習 |
+| `~/.little_agent/profile.md`（`LITTLE_AGENT_GLOBAL_PROFILE_PATH`） | 全体 | ユーザーの好み・作業スタイル・繰り返す意図 |
+
+memory.md と profile.md はいずれも次回以降のsystem promptに自動で差し込まれます。
+
+抽出のタイミング（ハイブリッド）:
+
+- セッション終了時（`/exit` や Ctrl+C）に自動実行
+- `/remember` コマンドで任意のタイミングに手動実行
+
+抽出はLLMを使うため、`OPENAI_API_KEY` が設定されているときのみ動作します（ローカルフォールバック時はスキップ）。`LITTLE_AGENT_AUTO_LEARNING=false` で無効化できます。保存は確認なしの自動です。
+
 ### Skill作成支援
 
 `skills/skill_creator` は、Little Agent用Skillの作成を支援するポータブルSkillです。
@@ -595,7 +622,6 @@ python -m pytest -q
 
 - Tool実行後にLLMへ戻すmulti-step loopは最小構成です
 - PowerShell安全ガードは簡易的です
-- 長期記憶は未実装です
 - 複数エージェントの協調は未実装です
 - Web検索Toolは抽象化候補として未実装です
 

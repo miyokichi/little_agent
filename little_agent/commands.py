@@ -363,6 +363,16 @@ def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:
     return DispatchResult(output="\n".join(lines))
 
 
+def _cmd_remember(ctx: CommandContext, args: str) -> DispatchResult:
+    try:
+        learned = ctx.agent.remember()
+    except Exception as exc:  # noqa: BLE001 - never let auto-learning break the prompt.
+        return DispatchResult(output=f"[memory] auto-learning skipped: {exc}")
+    return DispatchResult(
+        output="[memory] learned from this session." if learned else "[memory] nothing new to learn."
+    )
+
+
 def _cmd_agent(ctx: CommandContext, args: str) -> DispatchResult:
     name = args.strip()
     if not name:
@@ -393,4 +403,5 @@ def _builtin_commands() -> list[BuiltinCommand]:
         BuiltinCommand("reload", "Reload custom commands from disk.", _cmd_reload),
         BuiltinCommand("agents", "List agent profiles.", _cmd_agents),
         BuiltinCommand("agent", "Show or switch the active agent (/agent <name>).", _cmd_agent),
+        BuiltinCommand("remember", "Distill and save durable memory from this session.", _cmd_remember),
     ]

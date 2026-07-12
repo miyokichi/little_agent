@@ -874,6 +874,94 @@ class CoreTests(unittest.TestCase):
 
         self.assertTrue(updated.ok)
 
+    def _reflect_agent(self, workspace: Path, llm: object, enable: bool = True) -> Agent:
+        config = AgentConfig(
+            model="test",
+            workspace=workspace,
+            require_confirmation=False,
+            openai_api_key=None,
+            openai_base_url="https://api.openai.com/v1",
+            enable_logging=False,
+            global_memory_path=workspace / "global_memory.md",
+            global_profile_path=workspace / "global_profile.md",
+            enable_auto_learning=enable,
+        )
+        return Agent(config, SkillLoader(Path("skills").resolve()), llm=llm)  # type: ignore[arg-type]
+
+    def test_reflection_saves_and_injects_profiles(self) -> None:
+        class ReflectLLM:
+            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
+                system = str(messages[0].content) if messages else ""
+                if "durable memory" in system:
+                    return {
+                        "content": '{"global_profile": "- Prefers concise answers", '
+                        '"workspace_profile": "- Project: little_agent"}',
+                        "tool_calls": [],
+                    }
+                return {"content": "done", "tool_calls": []}
+
+        workspace = (Path.cwd() / ".test-reflect-workspace").resolve()
+        try:
+            agent = self._reflect_agent(workspace, ReflectLLM())
+            agent.run("help me refactor concisely")
+            learned = agent.end_session()
+            prompt = agent._system_prompt([]).content
+        finally:
+            for name in ("global_profile.md", "profile.md", "global_memory.md", "memory.md"):
+                (workspace / name).unlink(missing_ok=True)
+            with suppress(OSError):
+                workspace.rmdir()
+
+        self.assertTrue(learned)
+        self.assertIn("Prefers concise answers", prompt)
+        self.assertIn("Project: little_agent", prompt)
+
+    def test_reflection_skipped_in_local_fallback(self) -> None:
+        from little_agent.llm import LocalRuleClient
+
+        workspace = (Path.cwd() / ".test-reflect-local-workspace").resolve()
+        try:
+            agent = self._reflect_agent(workspace, LocalRuleClient())
+            agent.run("date")
+            learned = agent.end_session()
+            profile_exists = (workspace / "global_profile.md").exists()
+        finally:
+            for name in ("global_profile.md", "profile.md", "global_memory.md", "memory.md"):
+                (workspace / name).unlink(missing_ok=True)
+            with suppress(OSError):
+                workspace.rmdir()
+
+        self.assertFalse(learned)
+        self.assertFalse(profile_exists)
+
+    def test_reflection_is_noop_without_new_messages(self) -> None:
+        class ReflectLLM:
+            def __init__(self) -> None:
+                self.reflect_calls = 0
+
+            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
+                if messages and "durable memory" in str(messages[0].content):
+                    self.reflect_calls += 1
+                    return {"content": '{"global_profile": "- x", "workspace_profile": ""}', "tool_calls": []}
+                return {"content": "done", "tool_calls": []}
+
+        workspace = (Path.cwd() / ".test-reflect-noop-workspace").resolve()
+        llm = ReflectLLM()
+        try:
+            agent = self._reflect_agent(workspace, llm)
+            agent.run("hi")
+            first = agent.end_session()
+            second = agent.end_session()
+        finally:
+            for name in ("global_profile.md", "profile.md", "global_memory.md", "memory.md"):
+                (workspace / name).unlink(missing_ok=True)
+            with suppress(OSError):
+                workspace.rmdir()
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(llm.reflect_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

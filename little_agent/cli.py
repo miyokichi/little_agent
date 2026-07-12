@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Workspace: {config.workspace}")
     print(f"Active agent: {ctx.active_agent or 'library (all skills & tools)'}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
-    print("Type /help for commands, /exit to quit.\n")
+    print("Type /help for commands, /exit to quit. /remember saves what was learned so far.\n")
 
     while True:
         try:
@@ -162,3 +162,13 @@ def main(argv: list[str] | None = None) -> None:
         if result.should_exit:
             break
         print()
+
+    _end_session(ctx.agent)
+
+
+def _end_session(agent: Agent) -> None:
+    try:
+        if agent.end_session():
+            print("[memory] learned from this session.")
+    except Exception as exc:  # noqa: BLE001 - never let auto-learning break exit.
+        print(f"[memory] auto-learning skipped: {exc}")

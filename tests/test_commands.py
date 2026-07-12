@@ -199,7 +199,7 @@ class AgentCommandTests(unittest.TestCase):
     def test_agents_lists_created_with_active_marker(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            agents.create_agent(root / "agents", Path("skills").resolve(), "office", skills=["task_manager"])
+            agents.create_agent(root / "agents", Path("skills").resolve(), "office", skills=["datetime"])
             registry = _make_registry(root / "commands", root / "global")
             ctx = self._ctx(registry, root, active="office")
             output = registry.dispatch(ctx, "/agents").output

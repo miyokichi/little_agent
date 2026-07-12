@@ -14,4 +14,8 @@ data/projects.json*
 logs/
 agents/
 
+# Runtime memory/profile artifacts (workspace-level)
+memory.md
+profile.md
+
 *.png

@@ -35,6 +35,8 @@ class AgentConfig:
     agents_dir: Path = field(default_factory=lambda: (Path.cwd() / "agents").resolve())
     active_agent: str | None = None
     stop_hotkey: str = "<ctrl>+<alt>+q"
+    global_profile_path: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "profile.md")
+    enable_auto_learning: bool = True
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -57,6 +59,8 @@ class AgentConfig:
         agents_dir = configured_agents_dir if configured_agents_dir.is_absolute() else workspace / configured_agents_dir
         agents_dir = agents_dir.resolve()
         active_agent = os.getenv("LITTLE_AGENT_AGENT") or None
+        raw_global_profile = os.getenv("LITTLE_AGENT_GLOBAL_PROFILE_PATH")
+        global_profile_path = Path(raw_global_profile).resolve() if raw_global_profile else Path.home() / ".little_agent" / "profile.md"
         return cls(
             model=os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini"),
             workspace=workspace,
@@ -74,4 +78,6 @@ class AgentConfig:
             agents_dir=agents_dir,
             active_agent=active_agent,
             stop_hotkey=os.getenv("LITTLE_AGENT_STOP_HOTKEY", "<ctrl>+<alt>+q"),
+            global_profile_path=global_profile_path,
+            enable_auto_learning=_as_bool(os.getenv("LITTLE_AGENT_AUTO_LEARNING"), True),
         )

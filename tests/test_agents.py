@@ -43,16 +43,16 @@ class ProfileFilesystemTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
             profile = agents.create_agent(
-                agents_dir, LIBRARY, "Office Bot", description="office", skills=["task_manager"]
+                agents_dir, LIBRARY, "Office Bot", description="office", skills=["project_manager"]
             )
 
             self.assertEqual(profile.name, "office-bot")
-            self.assertTrue((profile.skills_dir / "task_manager" / "SKILL.md").exists())
-            self.assertFalse((profile.skills_dir / "workflow").exists())
-            self.assertEqual(profile.enabled_skills(), ["task_manager"])
+            self.assertTrue((profile.skills_dir / "project_manager" / "SKILL.md").exists())
+            self.assertFalse((profile.skills_dir / "datetime").exists())
+            self.assertEqual(profile.enabled_skills(), ["project_manager"])
             # Library is untouched.
-            self.assertTrue((LIBRARY / "task_manager").exists())
-            self.assertTrue((LIBRARY / "workflow").exists())
+            self.assertTrue((LIBRARY / "project_manager").exists())
+            self.assertTrue((LIBRARY / "file_manager").exists())
 
     def test_load_profile_round_trips(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -68,12 +68,12 @@ class ProfileFilesystemTests(unittest.TestCase):
     def test_add_remove_and_delete(self) -> None:
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
-            agents.create_agent(agents_dir, LIBRARY, "a", skills=["task_manager"])
+            agents.create_agent(agents_dir, LIBRARY, "a", skills=["project_manager"])
             agents.add_skill(agents_dir, LIBRARY, "a", "datetime")
-            self.assertEqual(set(agents.load_profile(agents_dir, "a").enabled_skills()), {"task_manager", "datetime"})
+            self.assertEqual(set(agents.load_profile(agents_dir, "a").enabled_skills()), {"project_manager", "datetime"})
 
             agents.remove_skill(agents_dir, "a", "datetime")
-            self.assertEqual(agents.load_profile(agents_dir, "a").enabled_skills(), ["task_manager"])
+            self.assertEqual(agents.load_profile(agents_dir, "a").enabled_skills(), ["project_manager"])
 
             agents.delete_agent(agents_dir, "a")
             self.assertFalse(agents.profile_exists(agents_dir, "a"))
@@ -106,7 +106,7 @@ class AgentToolFilteringTests(unittest.TestCase):
             root = Path(tmp)
             agents_dir = root / "agents"
             profile = agents.create_agent(
-                agents_dir, LIBRARY, "tooled", skills=["task_manager"], core_tools=["read_file"]
+                agents_dir, LIBRARY, "tooled", skills=["project_manager"], core_tools=["read_file"]
             )
             config = _config(root, agents_dir)
             loader = SkillLoader(profile.skills_dir)
