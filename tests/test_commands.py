@@ -189,12 +189,14 @@ class AgentCommandTests(unittest.TestCase):
         agent = Agent(config, SkillLoader(Path("skills").resolve()))
         return CommandContext(agent=agent, registry=registry, active_agent=active)
 
-    def test_agents_empty_reports_none(self) -> None:
+    def test_agents_lists_builtin_default_when_empty(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = _make_registry(root / "commands", root / "global")
             ctx = self._ctx(registry, root)
-            self.assertIn("No agents", registry.dispatch(ctx, "/agents").output)
+            output = registry.dispatch(ctx, "/agents").output
+            self.assertIn("default", output)
+            self.assertIn("built-in", output)
 
     def test_agents_lists_created_with_active_marker(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -30,54 +30,46 @@ def _make_confirm(stop_hotkey: str):
 
 def build_agent(
     config: AgentConfig,
-    profile: AgentProfile | None,
+    profile: AgentProfile,
     confirm,
     stop: StopController,
 ) -> Agent:
-    """Construct an Agent for a profile, or for the full library when None.
+    """Construct an Agent for a profile (use agents.default_profile for the library).
 
     Profile overrides (model / max_tool_steps / require_confirmation) are layered
     onto the base config; ``core_tools`` filters the built-in core tools; and the
-    skill loader is pointed at the agent's own copied skills directory.
+    skill loader is pointed at the profile's skills directory.
     """
 
-    if profile is not None:
-        skills_dir = profile.skills_dir
-        effective = replace(
-            config,
-            model=profile.model or config.model,
-            max_tool_steps=(
-                profile.max_tool_steps if profile.max_tool_steps is not None else config.max_tool_steps
-            ),
-            require_confirmation=(
-                profile.require_confirmation
-                if profile.require_confirmation is not None
-                else config.require_confirmation
-            ),
-        )
-        core_tools = profile.core_tools_set()
-    else:
-        skills_dir = config.skill_library_dir
-        effective = config
-        core_tools = None
-
-    skills = SkillLoader(skills_dir.resolve())
+    effective = replace(
+        config,
+        model=profile.model or config.model,
+        max_tool_steps=(
+            profile.max_tool_steps if profile.max_tool_steps is not None else config.max_tool_steps
+        ),
+        require_confirmation=(
+            profile.require_confirmation
+            if profile.require_confirmation is not None
+            else config.require_confirmation
+        ),
+    )
+    skills = SkillLoader(profile.skills_dir.resolve())
     return Agent(
         config=effective,
         skills=skills,
         confirm=confirm,
         stop=stop,
-        core_tools=core_tools,
+        core_tools=profile.core_tools_set(),
     )
 
 
-def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> AgentProfile | None:
-    """Pick the launch agent: explicit request > env default > picker > library."""
+def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> AgentProfile:
+    """Pick the launch agent: explicit request > env default > picker > default."""
 
     name = requested or config.active_agent
     if name:
         try:
-            return agents.load_profile(config.agents_dir, name)
+            return agents.resolve_active(config, name)
         except FileNotFoundError:
             available = agents.list_agents(config.agents_dir)
             hint = ", ".join(available) if available else "(none)"
@@ -85,25 +77,25 @@ def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> Age
 
     available = agents.list_agents(config.agents_dir)
     if not available:
-        return None
+        return agents.default_profile(config)
 
     print("Available agents:")
-    print("  0) (library — all skills & tools)")
+    print(f"  0) {agents.DEFAULT_AGENT_NAME} (all library skills & tools)")
     for index, agent_name in enumerate(available, start=1):
         print(f"  {index}) {agent_name}")
     try:
         choice = input("Select an agent [0]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
-        return None
+        return agents.default_profile(config)
     if not choice or choice == "0":
-        return None
+        return agents.default_profile(config)
     if choice.isdigit() and 1 <= int(choice) <= len(available):
         return agents.load_profile(config.agents_dir, available[int(choice) - 1])
     if choice in available:
         return agents.load_profile(config.agents_dir, choice)
-    print(f"Unknown selection '{choice}', using the library.")
-    return None
+    print(f"Unknown selection '{choice}', using '{agents.DEFAULT_AGENT_NAME}'.")
+    return agents.default_profile(config)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -119,17 +111,14 @@ def main(argv: list[str] | None = None) -> None:
     profile = _select_profile_at_launch(config, args.agent)
     agent = build_agent(config, profile, confirm, stop)
     registry = CommandRegistry(config.commands_dir, config.global_commands_dir)
-    ctx = CommandContext(agent=agent, registry=registry, active_agent=profile.name if profile else None)
+    ctx = CommandContext(agent=agent, registry=registry, active_agent=profile.name)
 
     def activate(name: str) -> str:
-        token = name.strip()
-        if token.lower() in {"library", "-", "none"}:
-            ctx.agent = build_agent(config, None, confirm, stop)
-            ctx.active_agent = None
-            return "Switched to the full skill library (no agent profile)."
-        switched = agents.load_profile(config.agents_dir, token)
+        switched = agents.resolve_active(config, name)
         ctx.agent = build_agent(config, switched, confirm, stop)
         ctx.active_agent = switched.name
+        if switched.builtin:
+            return f"Switched to '{switched.name}' (all library skills & tools)."
         return f"Switched to agent '{switched.name}' ({len(switched.enabled_skills())} skill(s))."
 
     ctx.activate = activate
@@ -137,7 +126,7 @@ def main(argv: list[str] | None = None) -> None:
     mode = "OpenAI" if config.openai_api_key else "local fallback"
     print(f"Little Agent ({mode})")
     print(f"Workspace: {config.workspace}")
-    print(f"Active agent: {ctx.active_agent or 'library (all skills & tools)'}")
+    print(f"Active agent: {ctx.active_agent}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
     print("Type /help for commands, /exit to quit. /remember saves what was learned so far.\n")
 

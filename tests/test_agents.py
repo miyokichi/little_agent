@@ -92,12 +92,31 @@ class ProfileFilesystemTests(unittest.TestCase):
 
     def test_resolve_active(self) -> None:
         with TemporaryDirectory() as tmp:
-            agents_dir = Path(tmp) / "agents"
-            self.assertIsNone(agents.resolve_active(agents_dir, None))
+            root = Path(tmp)
+            agents_dir = root / "agents"
+            config = _config(root, agents_dir)
+            # No request / reserved names resolve to the built-in default agent.
+            self.assertEqual(agents.resolve_active(config, None).name, agents.DEFAULT_AGENT_NAME)
+            self.assertTrue(agents.resolve_active(config, "default").builtin)
+            self.assertTrue(agents.resolve_active(config, "library").builtin)
             with self.assertRaises(FileNotFoundError):
-                agents.resolve_active(agents_dir, "missing")
+                agents.resolve_active(config, "missing")
             agents.create_agent(agents_dir, LIBRARY, "here", skills=["datetime"])
-            self.assertEqual(agents.resolve_active(agents_dir, "here").name, "here")
+            self.assertEqual(agents.resolve_active(config, "here").name, "here")
+
+    def test_default_profile_uses_library(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            default = agents.default_profile(_config(root, root / "agents"))
+            self.assertTrue(default.builtin)
+            self.assertEqual(default.skills_dir, LIBRARY)
+            self.assertIn("datetime", default.enabled_skills())
+            self.assertIsNone(default.core_tools_set())
+
+    def test_create_rejects_reserved_name(self) -> None:
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                agents.create_agent(Path(tmp) / "agents", LIBRARY, "default", skills=["datetime"])
 
 
 class AgentToolFilteringTests(unittest.TestCase):
@@ -123,8 +142,12 @@ class AgentToolFilteringTests(unittest.TestCase):
             root = Path(tmp)
             agents_dir = root / "agents"
             config = _config(root, agents_dir)
-            self.assertIsNone(agents.resolve_active(config.agents_dir, config.active_agent))
-            agent = Agent(config, SkillLoader(config.skill_library_dir))
+            # With no agent chosen, resolve_active yields the built-in default
+            # (the whole library), which build_agent turns into a full-library agent.
+            profile = agents.resolve_active(config, config.active_agent)
+            self.assertEqual(profile.name, agents.DEFAULT_AGENT_NAME)
+            self.assertTrue(profile.builtin)
+            agent = Agent(config, SkillLoader(profile.skills_dir), core_tools=profile.core_tools_set())
             names = set(agent.tools.names())
             self.assertIn("run_powershell", names)
             self.assertIn("add_task", names)  # full library skills loaded
