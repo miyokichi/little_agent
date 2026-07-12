@@ -338,28 +338,23 @@ def _cmd_reload(ctx: CommandContext, args: str) -> DispatchResult:
 
 
 def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:
-    agents_dir = ctx.agent.config.agents_dir
-    names = agent_profiles.list_agents(agents_dir)
-    if not names:
-        return DispatchResult(
-            output=(
-                "No agents defined. Create one with the agent_manager skill "
-                f"(e.g. \"officeエージェントを作って\"), or add folders under {agents_dir}."
-            )
-        )
-    lines = [f"Agents ({len(names)}):"]
-    for name in names:
+    config = ctx.agent.config
+    # The built-in "default" agent (the whole library) is always listed first,
+    # followed by any user-created agents on disk.
+    profiles = [agent_profiles.default_profile(config)]
+    for name in agent_profiles.list_agents(config.agents_dir):
         try:
-            profile = agent_profiles.load_profile(agents_dir, name)
-            description = profile.description or "(no description)"
-            skill_count = len(profile.enabled_skills())
-        except (OSError, ValueError) as exc:
-            description = f"(unreadable: {exc})"
-            skill_count = 0
-        marker = "*" if ctx.active_agent == name else " "
-        lines.append(f" {marker} {name:<20} {skill_count} skill(s)  {description}")
+            profiles.append(agent_profiles.load_profile(config.agents_dir, name))
+        except (OSError, ValueError):
+            continue
+    lines = [f"Agents ({len(profiles)}):"]
+    for profile in profiles:
+        marker = "*" if ctx.active_agent == profile.name else " "
+        tag = " [built-in]" if profile.builtin else ""
+        description = profile.description or "(no description)"
+        lines.append(f" {marker} {profile.name:<18} {len(profile.enabled_skills())} skill(s)  {description}{tag}")
     lines.append("")
-    lines.append("Active agent is marked with *. Switch with /agent <name> (or /agent library).")
+    lines.append("Active is marked with *. Switch with /agent <name> (/agent default for the library).")
     return DispatchResult(output="\n".join(lines))
 
 
@@ -376,9 +371,11 @@ def _cmd_remember(ctx: CommandContext, args: str) -> DispatchResult:
 def _cmd_agent(ctx: CommandContext, args: str) -> DispatchResult:
     name = args.strip()
     if not name:
-        current = ctx.active_agent or "library (all skills & tools)"
         return DispatchResult(
-            output=f"Active agent: {current}\nUse /agents to list, /agent <name> to switch (or /agent library)."
+            output=(
+                f"Active agent: {ctx.active_agent}\n"
+                "Use /agents to list, /agent <name> to switch (/agent default for the library)."
+            )
         )
     if ctx.activate is None:
         return DispatchResult(output="Agent switching is not available in this context.")

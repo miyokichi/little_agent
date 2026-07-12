@@ -21,6 +21,9 @@ from typing import Any
 
 AGENT_CONFIG_FILE = "agent.json"
 
+# Reserved for the built-in "default" agent (the whole library); not creatable.
+RESERVED_NAMES = {"default", "library", "none", "-"}
+
 
 def main() -> int:
     try:
@@ -144,6 +147,8 @@ def create_agent(agents_dir: Path, library_dir: Path, arguments: dict[str, Any])
     name = normalize_name(str(arguments.get("name") or ""))
     if not name:
         return {"ok": False, "content": "Agent name is required."}
+    if name in RESERVED_NAMES:
+        return {"ok": False, "content": f"'{name}' is reserved for the built-in library agent."}
     description = str(arguments.get("description") or "").strip()
     overwrite = bool(arguments.get("overwrite", False))
     skills = as_str_list(arguments.get("skills")) or []

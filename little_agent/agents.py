@@ -17,8 +17,17 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from little_agent.config import AgentConfig
 
 AGENT_CONFIG_FILE = "agent.json"
+
+# The library-wide mode is exposed as a built-in agent so that "run an agent" is
+# the single model. These names are reserved and cannot be used for real agents.
+DEFAULT_AGENT_NAME = "default"
+RESERVED_NAMES = {"default", "library", "none", "-"}
 
 
 def normalize_name(name: str) -> str:
@@ -51,10 +60,15 @@ class AgentProfile:
     core_tools: list[str] | None = None
     max_tool_steps: int | None = None
     require_confirmation: bool | None = None
+    # ``builtin`` marks the virtual "default" agent (the whole library); it has no
+    # agent.json on disk. ``skills_dir_override`` lets that agent point its skills
+    # at the library instead of ``dir/skills``.
+    builtin: bool = False
+    skills_dir_override: Path | None = None
 
     @property
     def skills_dir(self) -> Path:
-        return self.dir / "skills"
+        return self.skills_dir_override if self.skills_dir_override is not None else self.dir / "skills"
 
     @property
     def config_path(self) -> Path:
@@ -162,6 +176,8 @@ def create_agent(
     normalized = normalize_name(name)
     if not normalized:
         raise ValueError("Agent name is required.")
+    if normalized in RESERVED_NAMES:
+        raise ValueError(f"'{normalized}' is a reserved name for the built-in library agent.")
     directory = agent_dir(agents_dir, normalized)
     if directory.exists() and not overwrite:
         raise FileExistsError(f"Agent already exists: {normalized}")
@@ -207,13 +223,31 @@ def delete_agent(agents_dir: Path, name: str) -> None:
     shutil.rmtree(directory)
 
 
-def resolve_active(agents_dir: Path, requested: str | None) -> AgentProfile | None:
-    """Return the profile to run, or ``None`` to fall back to the full library.
+def default_profile(config: "AgentConfig") -> AgentProfile:
+    """The built-in ``default`` agent: the whole skill library, all core tools.
 
-    ``None``/empty ``requested`` returns ``None``. A named-but-missing agent
-    raises ``FileNotFoundError`` so the caller can report it clearly.
+    It is virtual (no agent.json on disk), so "run an agent" is the single model
+    and the library is just the agent you get when you don't pick another one.
     """
 
-    if not requested:
-        return None
-    return load_profile(agents_dir, requested)
+    return AgentProfile(
+        name=DEFAULT_AGENT_NAME,
+        dir=config.agents_dir / DEFAULT_AGENT_NAME,
+        description="All library skills and tools (built-in).",
+        builtin=True,
+        skills_dir_override=config.skill_library_dir,
+    )
+
+
+def resolve_active(config: "AgentConfig", requested: str | None) -> AgentProfile:
+    """Resolve the agent to run. Always returns a profile (never ``None``).
+
+    Empty/omitted ``requested`` (falling back to ``config.active_agent``) or a
+    reserved name yields the built-in ``default`` agent. A named-but-missing
+    agent raises ``FileNotFoundError`` so the caller can report it clearly.
+    """
+
+    name = requested or config.active_agent
+    if not name or name.strip().lower() in RESERVED_NAMES:
+        return default_profile(config)
+    return load_profile(config.agents_dir, name)
