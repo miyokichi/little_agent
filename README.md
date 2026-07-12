@@ -350,7 +350,7 @@ description: 指定ファイルをレビューして改善点を優先度付き�
 
 ```text
 > /help
-> /skills workflow
+> /skills project_manager
 > /review little_agent/agent.py
 > /plan 新製品発表の準備
 ```
