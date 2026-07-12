@@ -6,8 +6,9 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-data/tasks.json
+data/tasks.json*
 data/workflows.json*
+data/projects.json*
 .test-*.json
 .test-*/
 logs/

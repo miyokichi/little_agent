@@ -134,59 +134,42 @@ skills/<skill_name>/
 
 この構成にすると、`skills/<skill_name>` フォルダをコピーするだけでSkillの説明、Tool定義、実行ロジックをまとめて移動できます。
 
-### タスク管理仕様
+### プロジェクト/タスク管理仕様（AI+人間統合）
 
-タスク管理は `skills/task_manager` のポータブルSkillとして実装されています。core側にはタスク管理のロジックを持たせず、以下のSkill Script Toolを `skills/task_manager/tools.json` から読み込みます。
-
-| Tool | 内容 | 確認 |
-| --- | --- | --- |
-| `add_task` | タスクを `data/tasks.json` に追加 | 不要 |
-| `list_tasks` | タスク一覧を表示 | 不要 |
-| `complete_task` | タスクを完了にする | 不要 |
-| `delete_task` | タスクを削除 | 必要 |
-
-タスクは `data/tasks.json` に保存されます。保存される主なフィールドは以下です。
-
-- `id`: 8桁のタスクID
-- `title`: タスク名
-- `status`: `open` または `done`
-- `created_at`: 作成日時
-- `completed_at`: 完了日時
-- `due`: 期限または期限メモ
-- `priority`: 優先度
-- `notes`: 補足メモ
-
-削除は元に戻せないため、`delete_task` のみ実行前確認が必要です。
-
-### ワークフロー管理仕様（AI+人間統合）
-
-`skills/workflow` は、ゴールを **AIタスクと人間タスクの依存関係付きワークフロー（DAG）** として管理するポータブルSkillです。task_manager が単発TODO向けなのに対し、workflow は「AIが下書き → 人間がレビュー → AIが送信」のような複数タスクの進行管理に使います。
+`skills/project_manager` は、単発TODOから **AIタスクと人間タスクの依存関係付きワークフロー（DAG）** まで、プロジェクト単位で一元管理するポータブルSkillです。旧 `task_manager`（単発TODO）と旧 `workflow`（DAG）を統合したもので、プロジェクトやタスクの設定は **AI（本Skillのツール）と人間（ビューア）の両方** から行えます。
 
 | Tool | 内容 | 確認 |
 | --- | --- | --- |
-| `create_workflow` | タスクDAGを一括登録（依存参照は呼び出し内の一時キー） | 不要 |
-| `add_workflow_task` | 既存ワークフローにタスクを追加 | 不要 |
+| `create_project` | プロジェクトを作成（タスクDAGの一括登録も可） | 不要 |
+| `add_task` | タスクを追加（`project_id` なしなら Inbox へ） | 不要 |
+| `update_task` | タスクの内容を編集（タイトル、担当、期限、優先度、依存） | 不要 |
 | `update_task_status` | タスクの状態と結果を記録 | 不要 |
-| `show_workflow` | 詳細と着手可能（READY）タスクを表示 | 不要 |
-| `list_workflows` | 一覧と進捗を表示 | 不要 |
-| `delete_workflow` | ワークフローを削除 | 必要 |
-| `open_workflow_viewer` | ブラウザのビューアを起動 | 不要 |
+| `add_task_comment` | タスクに進捗コメントを追記 | 不要 |
+| `show_project` | 詳細と着手可能（READY）タスクを表示 | 不要 |
+| `list_projects` | プロジェクト一覧と進捗を表示 | 不要 |
+| `list_tasks` | 全プロジェクト横断のタスク一覧 | 不要 |
+| `delete_task` | タスクを削除（他タスクの依存参照も除去） | 必要 |
+| `delete_project` | プロジェクトを削除 | 必要 |
+| `open_project_viewer` | ブラウザのビューア/エディタを起動 | 不要 |
 
-データは `data/workflows.json` に保存されます。主なフィールド:
+データは `data/projects.json` に保存されます。主なフィールド:
 
-- workflow: `id`（8桁）、`title`、`goal`、`status`（`active` / `done`。全タスク完了で自動的に `done`）
-- task: `id`（8桁）、`title`、`description`、`assignee`（`ai` / `human`）、`status`（`pending` / `running` / `done` / `failed` / `skipped`）、`depends_on`（タスクIDの配列）、`result`（成果の要約）、`completed_via`（`agent` / `viewer`）
+- project: `id`（8桁）、`title`、`goal`、`status`（`active` / `done`。全タスク完了で自動的に `done`）、`inbox`（単発TODO受け皿フラグ）
+- task: `id`（8桁）、`title`、`description`、`assignee`（`ai` / `human`）、`assignee_name`（human タスクの担当者名。例: 山田さん。表示用で ai には付かない）、`status`（`pending` / `running` / `done` / `failed` / `skipped`）、`depends_on`（タスクIDの配列）、`due`、`priority`、`result`（成果の要約）、`comments`（進捗コメントの配列 `{at, via, text}`）、`created_via` / `completed_via`（`agent` / `viewer`。誰が作成/完了したか）
 
 状態のルール:
 
 - **ready（着手可能）**: `pending` かつ `depends_on` がすべて `done` または `skipped`。保存されず、表示時に導出されます。
 - AIタスクは、エージェントが作業の前後で `running` → `done`（+ `result`）を記録します。失敗時は `failed` と理由を記録します。
-- 人間タスクは承認ゲートとして機能します。ビューアの「完了にする」ボタンで完了させると、下流のタスクが ready になります。ビューアからの完了は「human かつ pending かつ ready」のタスクのみ許可されます。
-- エージェントとビューアの同時書き込みは、`data/workflows.json.lock` による排他と一時ファイル + `os.replace` によるatomic writeで保護されます。
+- 人間タスクは承認ゲートとして機能します。ビューアの「完了にする」ボタンで完了させると、下流のタスクが ready になります。
+- 依存関係の編集はAI/人間どちらの経路でも循環（サイクル）を検証して拒否します。
+- エージェントとビューアの同時書き込みは、`data/projects.json.lock` による排他と一時ファイル + `os.replace` によるatomic writeで保護されます。
 
-### ワークフロービューア
+旧データからの移行: 初回アクセス時に `data/workflows.json`（→ 各プロジェクト）と `data/tasks.json`（→ Inbox プロジェクト）を `data/projects.json` へ自動変換します。旧ファイルは `.bak` にリネームして退避します。
 
-`data/workflows.json` をブラウザで可視化するローカルWeb UIです（標準ライブラリのみ、追加依存なし）。
+### プロジェクトビューア（人間側の編集UI）
+
+`data/projects.json` をブラウザで可視化・編集するローカルWeb UIです（標準ライブラリのみ、追加依存なし）。人間はここからプロジェクトとタスクをフル操作（CRUD）できます。
 
 起動方法は2つ:
 
@@ -197,17 +180,19 @@ python -m little_agent.viewer --workspace . --port 8765
 
 ```text
 # または会話から
-> ワークフローのビューアを開いて
+> プロジェクトのビューアを開いて
 ```
 
 - URL: `http://127.0.0.1:8765/`（`LITTLE_AGENT_VIEWER_PORT` で変更可）
-- 表示: ワークフローのDAG図（Mermaid。ステータス色分け、AI=矩形 / 人間=平行四辺形、readyな人間タスクは琥珀色で強調）、「あなた待ち」パネル（readyな人間タスクと完了ボタン）、タスク詳細、全タスク一覧
+- 表示: タスクのDAG図（Mermaid。ステータス色分け、AI=矩形 / 人間=平行四辺形、readyな人間タスクは琥珀色で強調）、「あなた待ち」パネル（readyな人間タスクと完了ボタン）、タスク詳細、全タスク一覧
+- 編集: 「＋プロジェクト」でプロジェクト作成、「＋タスク」でタスク追加、行のダブルクリック（または詳細の「編集」）でタスク編集ダイアログ（タイトル、説明、担当、担当者名、状態、期限、優先度、依存タスクのチェックボックス）、タスク削除、プロジェクト削除
+- 担当者名: human タスクは「担当者名（任意）」に名前（例: 山田さん）を入れると、一覧・図・詳細で「👤 山田さん」と表示されます（担当を AI にすると名前欄は隠れ、値もクリアされます）
+- 進捗コメント: タスク詳細ペインにコメント欄があり、人間（`via=viewer`）とエージェント（`add_task_comment`, `via=agent`）が時系列でメモを残せます。ポーリング再描画中も入力中の下書きは保持されます
+- ビューアからの変更は `created_via` / `completed_via` が `viewer` として記録され、エージェント側は次のターンで `show_project` により最新状態を把握します
 - 約1.5秒間隔のポーリングで、エージェントの進捗がライブ反映されます
 - バインドは `127.0.0.1` のみで、外部からはアクセスできません
-- Mermaid はCDNから読み込みます。オフライン時は図の代わりに依存関係付きリスト表示へ自動フォールバックします（完了操作などの機能はオフラインでも動作します）
+- Mermaid はCDNから読み込みます。オフライン時は図の代わりに依存関係付きリスト表示へ自動フォールバックします（編集機能はオフラインでも動作します）
 - 停止は、手動起動なら `Ctrl+C`。会話から起動した場合はバックグラウンド常駐なので、タスクマネージャで該当の `python` プロセスを終了します
-
-注意: APIキーなしのローカルフォールバック（LocalRuleClient）はworkflow系Toolを呼ばないため、このSkillはOpenAI互換APIの設定時のみ実質的に使えます。
 
 ### PowerShell実行の安全仕様
 
@@ -251,8 +236,7 @@ Agentが従う手順や注意点。
 - `file_manager`: ファイル探索・読み書き・検索
 - `python_coder`: Python実装・調査・実行確認
 - `windows_operator`: Windows/PowerShell操作
-- `task_manager`: タスク、TODO、やることリストの管理
-- `workflow`: AIタスクと人間タスクを依存関係付きワークフロー（DAG）として管理・可視化
+- `project_manager`: プロジェクト/タスクの統合管理（単発TODOから依存関係付きDAGまで、AI/人間の両方から編集可能）
 - `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証
 - `agent_manager`: エージェントプロファイル（使うスキル・ツールの構成）の作成・管理
 - `excel_file`: `.xlsx` の読み取りと簡易作成
@@ -440,9 +424,10 @@ agents/                     # 各エージェント（.gitignore 対象。ユー
 > PowerShellでPythonのバージョンを確認して
 > 明日までに請求書を確認するタスクを追加して
 > 未完了タスクを見せて
-> 新製品発表の準備をワークフローにして。私のレビューを間に挟んで
-> ワークフローのビューアを開いて
+> 新製品発表の準備をプロジェクトにして。私のレビューを間に挟んで
+> プロジェクトのビューアを開いて
 > 資料収集が終わったので done にして
+> t2の期限を金曜にして、担当を私に変えて
 > reports/sales.xlsx の中身を読んで
 > 箇条書きから deck/plan.pptx を作って
 ```
@@ -485,7 +470,7 @@ token数は、OpenAI互換APIが `usage.prompt_tokens`、`usage.completion_token
 
 ```text
 > メール整理用のSkillを作って。scriptsとtools.jsonも含めて
-> skill_creatorで task_manager を検証して
+> skill_creatorで project_manager を検証して
 ```
 
 ### OfficeファイルSkill
@@ -620,6 +605,6 @@ python -m pytest -q
 - 会話ログの保存
 - Skillのembedding検索
 - 許可制PowerShell runner
-- GUIまたはWeb UI（ワークフロービューアは実装済み。汎用の会話UIは未実装）
+- GUIまたはWeb UI（プロジェクトビューアは実装済み。汎用の会話UIは未実装）
 - readyなAIタスクをエージェントが順に自動実行するワークフローのオーケストレーション
 - 複数agentのrole分担

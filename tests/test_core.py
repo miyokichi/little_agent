@@ -23,7 +23,7 @@ class CoreTests(unittest.TestCase):
                 "file_manager",
                 "python_coder",
                 "windows_operator",
-                "task_manager",
+                "project_manager",
                 "skill_creator",
                 "excel_file",
                 "ppt_file",
@@ -290,14 +290,21 @@ class CoreTests(unittest.TestCase):
         self.assertIn("tool_result", tool_events)
         self.assertGreaterEqual(usage_records[-1]["totals"]["total_tokens"], 1)
 
-    def test_skill_loader_reads_task_manager_script_tools(self) -> None:
+    def test_skill_loader_reads_project_manager_script_tools(self) -> None:
         tools = SkillLoader(Path("skills").resolve()).load_tools()
         names = {tool.name for tool in tools}
 
+        self.assertIn("create_project", names)
         self.assertIn("add_task", names)
+        self.assertIn("update_task", names)
+        self.assertIn("update_task_status", names)
+        self.assertIn("add_task_comment", names)
+        self.assertIn("show_project", names)
+        self.assertIn("list_projects", names)
         self.assertIn("list_tasks", names)
-        self.assertIn("complete_task", names)
         self.assertIn("delete_task", names)
+        self.assertIn("delete_project", names)
+        self.assertIn("open_project_viewer", names)
         self.assertIn("create_skill", names)
         self.assertIn("validate_skill", names)
         self.assertIn("read_excel", names)
@@ -310,13 +317,6 @@ class CoreTests(unittest.TestCase):
         self.assertIn("git_add", names)
         self.assertIn("git_commit", names)
         self.assertIn("take_screenshot", names)
-        self.assertIn("create_workflow", names)
-        self.assertIn("add_workflow_task", names)
-        self.assertIn("update_task_status", names)
-        self.assertIn("show_workflow", names)
-        self.assertIn("list_workflows", names)
-        self.assertIn("delete_workflow", names)
-        self.assertIn("open_workflow_viewer", names)
 
     def test_default_tools_do_not_include_portable_task_manager_tools(self) -> None:
         names = default_tools().names()
@@ -344,25 +344,21 @@ class CoreTests(unittest.TestCase):
 
     def test_task_tools_can_add_and_list_tasks(self) -> None:
         workspace = (Path.cwd() / ".test-task-workspace").resolve()
-        context = ToolContext(workspace=workspace)
-        tools = ToolRegistry()
-        for tool in SkillLoader(Path("skills").resolve()).load_tools():
-            tools.register(tool)
+        context, tools = self._project_tools(workspace)
 
         try:
             added = tools.get("add_task").run(context, title="Write task manager tests", priority="high")
             listed = tools.get("list_tasks").run(context, status="open")
+            stored = json.loads((workspace / "data" / "projects.json").read_text(encoding="utf-8"))
         finally:
-            tasks_file = workspace / "data" / "tasks.json"
-            tasks_file.unlink(missing_ok=True)
-            with suppress(OSError):
-                (workspace / "data").rmdir()
-            with suppress(OSError):
-                workspace.rmdir()
+            self._cleanup_project_workspace(workspace)
 
         self.assertTrue(added.ok)
         self.assertTrue(listed.ok)
         self.assertIn("Write task manager tests", listed.content)
+        self.assertIn("Inbox", listed.content)
+        # Standalone TODOs land in the auto-created inbox project.
+        self.assertTrue(stored["projects"][0]["inbox"])
 
     def test_skill_creator_can_create_and_validate_skill(self) -> None:
         workspace = (Path.cwd() / ".test-skill-creator-workspace").resolve()
@@ -456,7 +452,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Build skills", read.content)
 
     @staticmethod
-    def _workflow_tools(workspace: Path) -> tuple[ToolContext, ToolRegistry]:
+    def _project_tools(workspace: Path) -> tuple[ToolContext, ToolRegistry]:
         context = ToolContext(workspace=workspace)
         tools = ToolRegistry()
         for tool in SkillLoader(Path("skills").resolve()).load_tools():
@@ -464,20 +460,32 @@ class CoreTests(unittest.TestCase):
         return context, tools
 
     @staticmethod
-    def _cleanup_workflow_workspace(workspace: Path) -> None:
-        for name in ("workflows.json", "workflows.json.lock", "workflows.json.tmp"):
+    def _cleanup_project_workspace(workspace: Path) -> None:
+        for name in (
+            "projects.json",
+            "projects.json.lock",
+            "projects.json.tmp",
+            "workflows.json",
+            "workflows.json.bak",
+            "tasks.json",
+            "tasks.json.bak",
+        ):
             (workspace / "data" / name).unlink(missing_ok=True)
         with suppress(OSError):
             (workspace / "data").rmdir()
         with suppress(OSError):
             workspace.rmdir()
 
-    def test_workflow_tools_create_update_and_show(self) -> None:
-        workspace = (Path.cwd() / ".test-workflow-workspace").resolve()
-        context, tools = self._workflow_tools(workspace)
+    @staticmethod
+    def _read_projects(workspace: Path) -> dict:
+        return json.loads((workspace / "data" / "projects.json").read_text(encoding="utf-8"))
+
+    def test_project_tools_create_update_and_show(self) -> None:
+        workspace = (Path.cwd() / ".test-project-workspace").resolve()
+        context, tools = self._project_tools(workspace)
 
         try:
-            created = tools.get("create_workflow").run(
+            created = tools.get("create_project").run(
                 context,
                 title="Release prep",
                 goal="Ship v1",
@@ -486,31 +494,31 @@ class CoreTests(unittest.TestCase):
                     {"key": "t2", "title": "Review the report", "assignee": "human", "depends_on": ["t1"]},
                 ],
             )
-            stored = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
-            workflow = stored["workflows"][0]
-            task_ids = [task["id"] for task in workflow["tasks"]]
+            stored = self._read_projects(workspace)
+            project = stored["projects"][0]
+            task_ids = [task["id"] for task in project["tasks"]]
             updated = tools.get("update_task_status").run(
                 context, task_id=task_ids[0], status="done", result="Saved draft.md"
             )
-            shown = tools.get("show_workflow").run(context, workflow_id=workflow["id"])
+            shown = tools.get("show_project").run(context, project_id=project["id"])
         finally:
-            self._cleanup_workflow_workspace(workspace)
+            self._cleanup_project_workspace(workspace)
 
         self.assertTrue(created.ok)
         self.assertEqual([len(task_id) for task_id in task_ids], [8, 8])
-        self.assertEqual(workflow["tasks"][1]["depends_on"], [task_ids[0]])
-        self.assertEqual(workflow["tasks"][1]["assignee"], "human")
+        self.assertEqual(project["tasks"][1]["depends_on"], [task_ids[0]])
+        self.assertEqual(project["tasks"][1]["assignee"], "human")
         self.assertTrue(updated.ok)
         self.assertIn(f"READY: {task_ids[1]}(human)", updated.content)
         self.assertTrue(shown.ok)
         self.assertIn("<- READY", shown.content)
 
-    def test_workflow_create_rejects_invalid_input(self) -> None:
-        workspace = (Path.cwd() / ".test-workflow-invalid-workspace").resolve()
-        context, tools = self._workflow_tools(workspace)
+    def test_project_create_rejects_invalid_input(self) -> None:
+        workspace = (Path.cwd() / ".test-project-invalid-workspace").resolve()
+        context, tools = self._project_tools(workspace)
 
         try:
-            cyclic = tools.get("create_workflow").run(
+            cyclic = tools.get("create_project").run(
                 context,
                 title="Cyclic",
                 tasks=[
@@ -518,19 +526,19 @@ class CoreTests(unittest.TestCase):
                     {"key": "b", "title": "B", "assignee": "ai", "depends_on": ["a"]},
                 ],
             )
-            unknown_dep = tools.get("create_workflow").run(
+            unknown_dep = tools.get("create_project").run(
                 context,
                 title="Unknown dep",
                 tasks=[{"key": "a", "title": "A", "assignee": "ai", "depends_on": ["missing"]}],
             )
-            bad_assignee = tools.get("create_workflow").run(
+            bad_assignee = tools.get("create_project").run(
                 context,
                 title="Bad assignee",
                 tasks=[{"key": "a", "title": "A", "assignee": "robot"}],
             )
-            file_created = (workspace / "data" / "workflows.json").exists()
+            file_created = (workspace / "data" / "projects.json").exists()
         finally:
-            self._cleanup_workflow_workspace(workspace)
+            self._cleanup_project_workspace(workspace)
 
         self.assertFalse(cyclic.ok)
         self.assertIn("cycle", cyclic.content.lower())
@@ -540,94 +548,329 @@ class CoreTests(unittest.TestCase):
         self.assertIn("assignee", bad_assignee.content)
         self.assertFalse(file_created)
 
-    def test_workflow_viewer_serves_state_and_completes_human_task(self) -> None:
+    def test_update_task_edits_fields_and_rejects_cycles(self) -> None:
+        workspace = (Path.cwd() / ".test-project-edit-workspace").resolve()
+        context, tools = self._project_tools(workspace)
+
+        try:
+            tools.get("create_project").run(
+                context,
+                title="Edit me",
+                tasks=[
+                    {"key": "a", "title": "A", "assignee": "ai"},
+                    {"key": "b", "title": "B", "assignee": "ai", "depends_on": ["a"]},
+                ],
+            )
+            stored = self._read_projects(workspace)
+            ids = [task["id"] for task in stored["projects"][0]["tasks"]]
+
+            edited = tools.get("update_task").run(
+                context, task_id=ids[0], title="A2", assignee="human", due="tomorrow", priority="high"
+            )
+            cyclic = tools.get("update_task").run(context, task_id=ids[0], depends_on=[ids[1]])
+            self_dep = tools.get("update_task").run(context, task_id=ids[0], depends_on=[ids[0]])
+            stored_after = self._read_projects(workspace)
+            task_a = stored_after["projects"][0]["tasks"][0]
+        finally:
+            self._cleanup_project_workspace(workspace)
+
+        self.assertTrue(edited.ok)
+        self.assertEqual(task_a["title"], "A2")
+        self.assertEqual(task_a["assignee"], "human")
+        self.assertEqual(task_a["due"], "tomorrow")
+        self.assertEqual(task_a["priority"], "high")
+        self.assertFalse(cyclic.ok)
+        self.assertIn("cycle", cyclic.content.lower())
+        self.assertFalse(self_dep.ok)
+        self.assertEqual(task_a["depends_on"], [])
+
+    def test_assignee_name_for_human_tasks(self) -> None:
+        workspace = (Path.cwd() / ".test-project-name-workspace").resolve()
+        context, tools = self._project_tools(workspace)
+
+        try:
+            tools.get("create_project").run(
+                context,
+                title="Named",
+                tasks=[
+                    {"key": "t1", "title": "Draft", "assignee": "ai"},
+                    {"key": "t2", "title": "Review", "assignee": "human", "assignee_name": "山田さん"},
+                ],
+            )
+            stored = self._read_projects(workspace)
+            ids = [task["id"] for task in stored["projects"][0]["tasks"]]
+            shown = tools.get("show_project").run(context)
+
+            # An ai task must not carry a name.
+            ai_named = tools.get("add_task").run(
+                context, title="Solo", assignee="ai", assignee_name="無視される"
+            )
+            # Renaming and then switching to ai clears the name.
+            renamed = tools.get("update_task").run(context, task_id=ids[1], assignee_name="田中さん")
+            to_ai = tools.get("update_task").run(context, task_id=ids[1], assignee="ai")
+            stored_after = self._read_projects(workspace)
+            tasks_after = {t["id"]: t for t in stored_after["projects"][0]["tasks"]}
+        finally:
+            self._cleanup_project_workspace(workspace)
+
+        review = tasks_after[ids[1]]
+        self.assertEqual(stored["projects"][0]["tasks"][1]["assignee_name"], "山田さん")
+        self.assertIn("[山田さん/pending]", shown.content)
+        self.assertTrue(ai_named.ok)
+        self.assertTrue(renamed.ok)
+        self.assertTrue(to_ai.ok)
+        self.assertEqual(review["assignee"], "ai")
+        self.assertEqual(review["assignee_name"], "")
+
+    def test_task_comments_from_agent_and_viewer(self) -> None:
+        from little_agent.viewer import viewer_add_comment
+
+        workspace = (Path.cwd() / ".test-project-comment-workspace").resolve()
+        context, tools = self._project_tools(workspace)
+
+        try:
+            tools.get("create_project").run(
+                context,
+                title="Commented",
+                tasks=[{"key": "t1", "title": "Work", "assignee": "ai"}],
+            )
+            stored = self._read_projects(workspace)
+            project_id = stored["projects"][0]["id"]
+            task_id = stored["projects"][0]["tasks"][0]["id"]
+
+            agent_added = tools.get("add_task_comment").run(context, task_id=task_id, text="下書きを開始")
+            viewer_ok, _ = viewer_add_comment(
+                workspace, {"project_id": project_id, "task_id": task_id, "text": "方向性OKです"}
+            )
+            empty_rejected = tools.get("add_task_comment").run(context, task_id=task_id, text="  ")
+            shown = tools.get("show_project").run(context, project_id=project_id)
+            stored_after = self._read_projects(workspace)
+            comments = stored_after["projects"][0]["tasks"][0]["comments"]
+        finally:
+            self._cleanup_project_workspace(workspace)
+
+        self.assertTrue(agent_added.ok)
+        self.assertTrue(viewer_ok)
+        self.assertFalse(empty_rejected.ok)
+        self.assertEqual([c["via"] for c in comments], ["agent", "viewer"])
+        self.assertEqual([c["text"] for c in comments], ["下書きを開始", "方向性OKです"])
+        self.assertTrue(all(c["at"] for c in comments))
+        self.assertIn("comments=2", shown.content)
+        self.assertIn("方向性OKです", shown.content)
+
+    def test_delete_task_removes_dangling_dependencies(self) -> None:
+        workspace = (Path.cwd() / ".test-project-del-workspace").resolve()
+        context, tools = self._project_tools(workspace)
+
+        try:
+            tools.get("create_project").run(
+                context,
+                title="Del",
+                tasks=[
+                    {"key": "a", "title": "A", "assignee": "ai"},
+                    {"key": "b", "title": "B", "assignee": "ai", "depends_on": ["a"]},
+                ],
+            )
+            stored = self._read_projects(workspace)
+            ids = [task["id"] for task in stored["projects"][0]["tasks"]]
+            deleted = tools.get("delete_task").run(context, task_id=ids[0])
+            stored_after = self._read_projects(workspace)
+            remaining = stored_after["projects"][0]["tasks"]
+        finally:
+            self._cleanup_project_workspace(workspace)
+
+        self.assertTrue(deleted.ok)
+        self.assertEqual([task["id"] for task in remaining], [ids[1]])
+        self.assertEqual(remaining[0]["depends_on"], [])
+
+    def test_migration_from_legacy_tasks_and_workflows(self) -> None:
+        workspace = (Path.cwd() / ".test-project-migrate-workspace").resolve()
+        data_dir = workspace / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        legacy_workflow = {
+            "version": 1,
+            "workflows": [
+                {
+                    "id": "wf000001",
+                    "title": "Old flow",
+                    "goal": "",
+                    "status": "active",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "tasks": [
+                        {
+                            "id": "aaaa0001",
+                            "title": "Old task",
+                            "description": "",
+                            "assignee": "ai",
+                            "status": "pending",
+                            "depends_on": [],
+                            "result": "",
+                            "created_at": "2026-01-01T00:00:00+00:00",
+                            "started_at": None,
+                            "completed_at": None,
+                            "completed_via": None,
+                        }
+                    ],
+                }
+            ],
+        }
+        legacy_tasks = [
+            {
+                "id": "bbbb0001",
+                "title": "Buy milk",
+                "status": "open",
+                "created_at": "2026-01-02T00:00:00+00:00",
+                "due": "friday",
+                "priority": "high",
+                "notes": "2 bottles",
+            },
+            {"id": "bbbb0002", "title": "Done thing", "status": "done", "completed_at": "2026-01-03T00:00:00+00:00"},
+        ]
+        (data_dir / "workflows.json").write_text(json.dumps(legacy_workflow), encoding="utf-8")
+        (data_dir / "tasks.json").write_text(json.dumps(legacy_tasks), encoding="utf-8")
+        context, tools = self._project_tools(workspace)
+
+        try:
+            listed = tools.get("list_projects").run(context, status="all")
+            stored = self._read_projects(workspace)
+            titles = {project["title"] for project in stored["projects"]}
+            inbox = next(project for project in stored["projects"] if project.get("inbox"))
+            migrated_open = next(task for task in inbox["tasks"] if task["id"] == "bbbb0001")
+            migrated_done = next(task for task in inbox["tasks"] if task["id"] == "bbbb0002")
+            legacy_backed_up = (
+                (data_dir / "workflows.json.bak").exists()
+                and (data_dir / "tasks.json.bak").exists()
+                and not (data_dir / "workflows.json").exists()
+                and not (data_dir / "tasks.json").exists()
+            )
+        finally:
+            self._cleanup_project_workspace(workspace)
+
+        self.assertTrue(listed.ok)
+        self.assertEqual(titles, {"Old flow", "Inbox"})
+        self.assertEqual(migrated_open["status"], "pending")
+        self.assertEqual(migrated_open["description"], "2 bottles")
+        self.assertEqual(migrated_open["due"], "friday")
+        self.assertEqual(migrated_done["status"], "done")
+        self.assertTrue(legacy_backed_up)
+
+    def test_project_viewer_serves_state_and_full_crud(self) -> None:
         import threading
         import urllib.error
         import urllib.request
 
         from little_agent.viewer import make_server
 
-        workspace = (Path.cwd() / ".test-workflow-viewer-workspace").resolve()
-        context, tools = self._workflow_tools(workspace)
+        workspace = (Path.cwd() / ".test-project-viewer-workspace").resolve()
+        workspace.mkdir(parents=True, exist_ok=True)
 
-        def post_complete(port: int, workflow_id: str, task_id: str) -> int:
+        def post_json(port: int, route: str, body: dict) -> tuple[int, dict]:
             request = urllib.request.Request(
-                f"http://127.0.0.1:{port}/api/complete",
-                data=json.dumps({"workflow_id": workflow_id, "task_id": task_id}).encode("utf-8"),
+                f"http://127.0.0.1:{port}{route}",
+                data=json.dumps(body).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
             try:
                 with urllib.request.urlopen(request, timeout=5) as response:
-                    return response.status
+                    return response.status, json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as error:
-                return error.code
+                return error.code, json.loads(error.read().decode("utf-8"))
 
         server = None
         try:
-            tools.get("create_workflow").run(
-                context,
-                title="Viewer flow",
-                tasks=[
-                    {"key": "t1", "title": "Prepare", "assignee": "ai"},
-                    {"key": "t2", "title": "Approve", "assignee": "human", "depends_on": ["t1"]},
-                    {"key": "t3", "title": "Send", "assignee": "ai", "depends_on": ["t2"]},
-                ],
-            )
-            stored = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
-            workflow = stored["workflows"][0]
-            ids = [task["id"] for task in workflow["tasks"]]
-            tools.get("update_task_status").run(context, task_id=ids[0], status="done")
-
             server = make_server(workspace, 0)
             port = server.server_address[1]
             threading.Thread(target=server.serve_forever, daemon=True).start()
 
+            proj_status, proj_body = post_json(port, "/api/project/create", {"title": "Viewer proj", "goal": "g"})
+            project_id = proj_body["id"]
+            task1_status, task1_body = post_json(
+                port, "/api/task/create", {"project_id": project_id, "title": "Step 1", "assignee": "ai"}
+            )
+            task1_id = task1_body["id"]
+            task2_status, task2_body = post_json(
+                port,
+                "/api/task/create",
+                {
+                    "project_id": project_id,
+                    "title": "Step 2",
+                    "assignee": "human",
+                    "assignee_name": "山田さん",
+                    "depends_on": [task1_id],
+                },
+            )
+            task2_id = task2_body["id"]
+            cycle_status, _cycle_body = post_json(
+                port,
+                "/api/task/update",
+                {"project_id": project_id, "task_id": task1_id, "depends_on": [task2_id]},
+            )
+            edit_status, _edit_body = post_json(
+                port,
+                "/api/task/update",
+                {"project_id": project_id, "task_id": task1_id, "status": "done", "title": "Step 1 (edited)"},
+            )
+            comment_status, _comment_body = post_json(
+                port,
+                "/api/task/comment",
+                {"project_id": project_id, "task_id": task1_id, "text": "経過メモ"},
+            )
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=5) as response:
                 state = json.loads(response.read().decode("utf-8"))
-            ready_flags = {task["id"]: task["ready"] for task in state["workflows"][0]["tasks"]}
-
-            ai_rejected = post_complete(port, workflow["id"], ids[0])
-            blocked_rejected = post_complete(port, workflow["id"], ids[2])
-            human_completed = post_complete(port, workflow["id"], ids[1])
-            stored_after = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
-            human_task = stored_after["workflows"][0]["tasks"][1]
+            delete_status, _delete_body = post_json(
+                port, "/api/task/delete", {"project_id": project_id, "task_id": task2_id}
+            )
+            stored = self._read_projects(workspace)
+            tasks_after = stored["projects"][0]["tasks"]
         finally:
             if server is not None:
                 server.shutdown()
                 server.server_close()
-            self._cleanup_workflow_workspace(workspace)
+            self._cleanup_project_workspace(workspace)
 
         self.assertEqual(state["app"], "little-agent-viewer")
-        self.assertEqual(ready_flags, {ids[0]: False, ids[1]: True, ids[2]: False})
-        self.assertEqual(ai_rejected, 409)
-        self.assertEqual(blocked_rejected, 409)
-        self.assertEqual(human_completed, 200)
-        self.assertEqual(human_task["status"], "done")
-        self.assertEqual(human_task["completed_via"], "viewer")
+        self.assertEqual((proj_status, task1_status, task2_status), (200, 200, 200))
+        self.assertEqual(cycle_status, 409)
+        self.assertEqual(edit_status, 200)
+        self.assertEqual(comment_status, 200)
+        viewer_task = next(task for task in state["projects"][0]["tasks"] if task["id"] == task1_id)
+        self.assertEqual(viewer_task["status"], "done")
+        self.assertEqual(viewer_task["title"], "Step 1 (edited)")
+        self.assertEqual(viewer_task["completed_via"], "viewer")
+        self.assertEqual(viewer_task["created_via"], "viewer")
+        self.assertEqual([c["text"] for c in viewer_task["comments"]], ["経過メモ"])
+        self.assertEqual(viewer_task["comments"][0]["via"], "viewer")
+        human_task = next(task for task in state["projects"][0]["tasks"] if task["id"] == task2_id)
+        self.assertEqual(human_task["assignee_name"], "山田さん")
+        ready_flags = {task["id"]: task["ready"] for task in state["projects"][0]["tasks"]}
+        self.assertEqual(ready_flags, {task1_id: False, task2_id: True})
+        self.assertEqual(delete_status, 200)
+        self.assertEqual([task["id"] for task in tasks_after], [task1_id])
 
-    def test_workflow_update_breaks_stale_lock(self) -> None:
+    def test_project_update_breaks_stale_lock(self) -> None:
         import os
         import time
 
-        workspace = (Path.cwd() / ".test-workflow-lock-workspace").resolve()
-        context, tools = self._workflow_tools(workspace)
+        workspace = (Path.cwd() / ".test-project-lock-workspace").resolve()
+        context, tools = self._project_tools(workspace)
 
         try:
-            tools.get("create_workflow").run(
+            tools.get("create_project").run(
                 context,
                 title="Locked",
                 tasks=[{"key": "t1", "title": "Only task", "assignee": "ai"}],
             )
-            stored = json.loads((workspace / "data" / "workflows.json").read_text(encoding="utf-8"))
-            task_id = stored["workflows"][0]["tasks"][0]["id"]
-            lock_path = workspace / "data" / "workflows.json.lock"
+            stored = self._read_projects(workspace)
+            task_id = stored["projects"][0]["tasks"][0]["id"]
+            lock_path = workspace / "data" / "projects.json.lock"
             lock_path.write_text("", encoding="utf-8")
             stale = time.time() - 60
             os.utime(lock_path, (stale, stale))
             updated = tools.get("update_task_status").run(context, task_id=task_id, status="done")
         finally:
-            self._cleanup_workflow_workspace(workspace)
+            self._cleanup_project_workspace(workspace)
 
         self.assertTrue(updated.ok)
 
