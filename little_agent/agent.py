@@ -26,10 +26,13 @@ class Agent:
         llm: LLMClient | None = None,
         confirm: ConfirmCallback | None = None,
         stop: StopController | None = None,
+        core_tools: set[str] | None = None,
     ) -> None:
         self.config = config
         self.skills = skills
-        self.tools = tools or default_tools()
+        # ``core_tools`` is a per-agent allowlist for the built-in core tools.
+        # Skill script tools and memory tools below are always registered.
+        self.tools = tools or default_tools(core_tools)
         for tool in self.skills.load_tools():
             if tool.name not in self.tools.names():
                 self.tools.register(tool)

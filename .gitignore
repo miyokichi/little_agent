@@ -11,5 +11,6 @@ data/workflows.json*
 .test-*.json
 .test-*/
 logs/
+agents/
 
 *.png

@@ -1,0 +1,396 @@
+"""Slash command framework for the CLI.
+
+Two kinds of commands are supported:
+
+* **Built-in commands** run inside the CLI and never call the LLM. They control
+  the session or report state (``/help``, ``/clear``, ``/skills`` ...).
+* **Custom commands** are markdown files under a project ``commands/`` directory
+  (and an optional global ``~/.little_agent/commands/``). Each file is a prompt
+  template that is expanded with the caller's arguments and sent to
+  ``agent.run()``. Custom commands are portable: dropping a ``.md`` file into the
+  directory adds a command, mirroring the file-based skill philosophy.
+
+Dispatch order for ``/name args`` input:
+
+1. ``//text``           -> send literal ``/text`` to the agent (escape hatch).
+2. built-in match       -> run handler locally, no LLM call.
+3. custom match         -> expand template, send to ``agent.run()``.
+4. no match             -> print an "unknown command" hint, never call the LLM.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from little_agent import agents as agent_profiles
+
+if TYPE_CHECKING:
+    from little_agent.agent import Agent
+
+
+@dataclass(slots=True)
+class DispatchResult:
+    """What the CLI should do after a slash command is handled.
+
+    ``output`` is printed immediately. ``agent_prompt`` (if set) is passed to
+    ``agent.run()`` and its answer printed. ``should_exit`` ends the session.
+    """
+
+    output: str | None = None
+    agent_prompt: str | None = None
+    should_exit: bool = False
+
+
+@dataclass(slots=True)
+class CommandContext:
+    """References a built-in handler may read from or mutate.
+
+    ``activate`` is supplied by the CLI to switch the running agent to another
+    profile; it rebuilds ``agent`` (fresh context) and returns a status string.
+    ``active_agent`` is the current profile name, or ``None`` for the library.
+    """
+
+    agent: "Agent"
+    registry: "CommandRegistry"
+    active_agent: str | None = None
+    activate: Callable[[str], str] | None = None
+
+
+BuiltinHandler = Callable[[CommandContext, str], DispatchResult]
+
+
+@dataclass(slots=True)
+class BuiltinCommand:
+    name: str
+    description: str
+    handler: BuiltinHandler
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class CustomCommand:
+    name: str
+    description: str
+    template: str
+    source: Path
+    scope: str  # "project" or "global"
+
+    def render(self, args: str) -> str:
+        return render_template(self.template, args)
+
+
+# --- template expansion -----------------------------------------------------
+
+_POSITIONAL = re.compile(r"\$(\d+)")
+_FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
+
+
+def render_template(template: str, args: str) -> str:
+    """Substitute ``$ARGUMENTS`` and ``$1``, ``$2`` ... placeholders.
+
+    ``$ARGUMENTS`` expands to the full argument string; ``$N`` to the Nth
+    whitespace-separated token (empty if missing). If the template contains no
+    placeholder at all and arguments were given, they are appended so a bare
+    template still receives its input.
+    """
+
+    args = args.strip()
+    positional = args.split()
+    has_arguments = "$ARGUMENTS" in template
+    has_positional = bool(_POSITIONAL.search(template))
+
+    rendered = template.replace("$ARGUMENTS", args)
+
+    def _replace(match: re.Match[str]) -> str:
+        index = int(match.group(1))
+        return positional[index - 1] if 1 <= index <= len(positional) else ""
+
+    rendered = _POSITIONAL.sub(_replace, rendered)
+
+    if not has_arguments and not has_positional and args:
+        rendered = f"{rendered.rstrip()}\n\n{args}"
+    return rendered.strip()
+
+
+def parse_frontmatter(raw: str) -> tuple[dict[str, str], str]:
+    """Split a leading ``---`` YAML-ish frontmatter block from the body.
+
+    Only simple ``key: value`` lines are parsed (no external YAML dependency).
+    Returns ``(metadata, body)``; metadata is empty when no frontmatter exists.
+    """
+
+    match = _FRONTMATTER.match(raw)
+    if not match:
+        return {}, raw
+    meta_block, body = match.group(1), match.group(2)
+    meta: dict[str, str] = {}
+    for line in meta_block.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        meta[key.strip().lower()] = value.strip().strip('"').strip("'")
+    return meta, body
+
+
+def load_custom_commands(scoped_dirs: list[tuple[str, Path]]) -> dict[str, CustomCommand]:
+    """Load ``*.md`` command files from each ``(scope, dir)``.
+
+    Later entries override earlier ones on a name clash, so pass global before
+    project to let project commands win.
+    """
+
+    commands: dict[str, CustomCommand] = {}
+    for scope, directory in scoped_dirs:
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.md")):
+            name = path.stem.lower()
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            meta, body = parse_frontmatter(raw)
+            commands[name] = CustomCommand(
+                name=name,
+                description=meta.get("description", ""),
+                template=body.strip(),
+                source=path,
+                scope=scope,
+            )
+    return commands
+
+
+# --- registry ---------------------------------------------------------------
+
+
+class CommandRegistry:
+    def __init__(self, project_commands_dir: Path, global_commands_dir: Path) -> None:
+        self.project_commands_dir = project_commands_dir
+        self.global_commands_dir = global_commands_dir
+        self.builtins: dict[str, BuiltinCommand] = {}
+        self.aliases: dict[str, str] = {}
+        self.custom: dict[str, CustomCommand] = {}
+        for command in _builtin_commands():
+            self.builtins[command.name] = command
+            for alias in command.aliases:
+                self.aliases[alias] = command.name
+        self.reload_custom()
+
+    def reload_custom(self) -> int:
+        self.custom = load_custom_commands(
+            [
+                ("global", self.global_commands_dir),
+                ("project", self.project_commands_dir),
+            ]
+        )
+        return len(self.custom)
+
+    def dispatch(self, ctx: CommandContext, text: str) -> DispatchResult | None:
+        """Return a result for slash input, or ``None`` for ordinary input."""
+
+        if not text.startswith("/"):
+            return None
+        if text.startswith("//"):
+            return DispatchResult(agent_prompt=text[1:])
+
+        parts = text[1:].split(maxsplit=1)
+        if not parts:
+            return self.builtins["help"].handler(ctx, "")
+        name = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        canonical = self.aliases.get(name, name)
+        if canonical in self.builtins:
+            return self.builtins[canonical].handler(ctx, args)
+        if name in self.custom:
+            return DispatchResult(agent_prompt=self.custom[name].render(args))
+        return DispatchResult(
+            output=f"Unknown command: /{name}\nType /help to see available commands."
+        )
+
+
+# --- built-in handlers ------------------------------------------------------
+
+
+def _cmd_help(ctx: CommandContext, args: str) -> DispatchResult:
+    registry = ctx.registry
+    lines = ["Built-in commands:"]
+    for command in sorted(registry.builtins.values(), key=lambda c: c.name):
+        names = "/" + command.name
+        if command.aliases:
+            names += ", " + ", ".join("/" + a for a in command.aliases)
+        lines.append(f"  {names:<20} {command.description}")
+
+    lines.append("")
+    if registry.custom:
+        lines.append("Custom commands:")
+        for command in sorted(registry.custom.values(), key=lambda c: c.name):
+            description = command.description or "(no description)"
+            lines.append(f"  {'/' + command.name:<20} {description}  [{command.scope}]")
+    else:
+        lines.append("Custom commands: none.")
+        lines.append(f"  Add {'.md'} files to: {registry.project_commands_dir}")
+        lines.append(f"  or (global):         {registry.global_commands_dir}")
+
+    lines.append("")
+    lines.append("Prefix a message with // to send literal text starting with a slash.")
+    return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_exit(ctx: CommandContext, args: str) -> DispatchResult:
+    return DispatchResult(should_exit=True)
+
+
+def _cmd_clear(ctx: CommandContext, args: str) -> DispatchResult:
+    count = len(ctx.agent.memory.messages)
+    ctx.agent.memory.messages.clear()
+    return DispatchResult(output=f"Conversation memory cleared ({count} message(s) dropped).")
+
+
+def _first_line(text: str, limit: int = 80) -> str:
+    line = text.strip().splitlines()[0].strip() if text.strip() else ""
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _cmd_skills(ctx: CommandContext, args: str) -> DispatchResult:
+    skills = ctx.agent.skills.load_all()
+    query = args.strip().lower()
+    if query:
+        match = next((s for s in skills if s.name.lower() == query), None)
+        if match is None:
+            return DispatchResult(output=f"No skill named '{args.strip()}'. Try /skills for the list.")
+        return DispatchResult(output=match.as_prompt())
+    if not skills:
+        return DispatchResult(output="No skills loaded.")
+    lines = [f"Loaded skills ({len(skills)}):"]
+    for skill in skills:
+        lines.append(f"  {skill.name:<22} {_first_line(skill.description)}")
+    lines.append("")
+    lines.append("Use /skills <name> to see a skill's full instructions.")
+    return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_tools(ctx: CommandContext, args: str) -> DispatchResult:
+    names = ctx.agent.tools.names()
+    lines = [f"Registered tools ({len(names)}):"]
+    for name in names:
+        tool = ctx.agent.tools.get(name)
+        flag = " (confirm)" if getattr(tool, "requires_confirmation", False) else ""
+        lines.append(f"  {name:<22} {_first_line(tool.description)}{flag}")
+    return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_memory(ctx: CommandContext, args: str) -> DispatchResult:
+    global_mem = ctx.agent.global_memory.load()
+    workspace_mem = ctx.agent.workspace_memory.load()
+    lines = [
+        f"Global memory  ({ctx.agent.global_memory.path}):",
+        global_mem or "  (empty)",
+        "",
+        f"Workspace memory ({ctx.agent.workspace_memory.path}):",
+        workspace_mem or "  (empty)",
+    ]
+    return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_usage(ctx: CommandContext, args: str) -> DispatchResult:
+    logger = ctx.agent.logger
+    if logger is None:
+        return DispatchResult(output="Logging is disabled, so no usage totals are tracked.")
+    totals = logger.usage_totals
+    estimated = ""
+    if totals.estimated_tokens:
+        estimated = f" (of which ~{totals.estimated_tokens} estimated)"
+    lines = [
+        f"Session usage (session {logger.session_id}):",
+        f"  prompt     : {totals.prompt_tokens}",
+        f"  completion : {totals.completion_tokens}",
+        f"  total      : {totals.total_tokens}{estimated}",
+    ]
+    return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_config(ctx: CommandContext, args: str) -> DispatchResult:
+    config = ctx.agent.config
+    lines = [
+        "Configuration:",
+        f"  model              : {config.model}",
+        f"  workspace          : {config.workspace}",
+        f"  require_confirmation: {config.require_confirmation}",
+        f"  max_tool_steps     : {config.max_tool_steps}",
+        f"  enable_logging     : {config.enable_logging}",
+        f"  base_url           : {config.openai_base_url}",
+        f"  api_key            : {'set' if config.openai_api_key else 'not set (local fallback)'}",
+        f"  commands (project) : {config.commands_dir}",
+        f"  commands (global)  : {config.global_commands_dir}",
+    ]
+    return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_reload(ctx: CommandContext, args: str) -> DispatchResult:
+    count = ctx.registry.reload_custom()
+    return DispatchResult(output=f"Reloaded custom commands ({count} found). Skills reload automatically each turn.")
+
+
+def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:
+    agents_dir = ctx.agent.config.agents_dir
+    names = agent_profiles.list_agents(agents_dir)
+    if not names:
+        return DispatchResult(
+            output=(
+                "No agents defined. Create one with the agent_manager skill "
+                f"(e.g. \"officeエージェントを作って\"), or add folders under {agents_dir}."
+            )
+        )
+    lines = [f"Agents ({len(names)}):"]
+    for name in names:
+        try:
+            profile = agent_profiles.load_profile(agents_dir, name)
+            description = profile.description or "(no description)"
+            skill_count = len(profile.enabled_skills())
+        except (OSError, ValueError) as exc:
+            description = f"(unreadable: {exc})"
+            skill_count = 0
+        marker = "*" if ctx.active_agent == name else " "
+        lines.append(f" {marker} {name:<20} {skill_count} skill(s)  {description}")
+    lines.append("")
+    lines.append("Active agent is marked with *. Switch with /agent <name> (or /agent library).")
+    return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_agent(ctx: CommandContext, args: str) -> DispatchResult:
+    name = args.strip()
+    if not name:
+        current = ctx.active_agent or "library (all skills & tools)"
+        return DispatchResult(
+            output=f"Active agent: {current}\nUse /agents to list, /agent <name> to switch (or /agent library)."
+        )
+    if ctx.activate is None:
+        return DispatchResult(output="Agent switching is not available in this context.")
+    try:
+        return DispatchResult(output=ctx.activate(name))
+    except FileNotFoundError as exc:
+        return DispatchResult(output=str(exc))
+    except (OSError, ValueError) as exc:
+        return DispatchResult(output=f"Could not switch agent: {exc}")
+
+
+def _builtin_commands() -> list[BuiltinCommand]:
+    return [
+        BuiltinCommand("help", "List available commands.", _cmd_help, aliases=("?",)),
+        BuiltinCommand("exit", "Quit the session.", _cmd_exit, aliases=("quit",)),
+        BuiltinCommand("clear", "Clear the conversation memory (fresh context).", _cmd_clear),
+        BuiltinCommand("skills", "List loaded skills (/skills <name> for detail).", _cmd_skills),
+        BuiltinCommand("tools", "List registered tools.", _cmd_tools),
+        BuiltinCommand("memory", "Show workspace and global memory.", _cmd_memory),
+        BuiltinCommand("usage", "Show this session's token usage.", _cmd_usage),
+        BuiltinCommand("config", "Show the current configuration.", _cmd_config),
+        BuiltinCommand("reload", "Reload custom commands from disk.", _cmd_reload),
+        BuiltinCommand("agents", "List agent profiles.", _cmd_agents),
+        BuiltinCommand("agent", "Show or switch the active agent (/agent <name>).", _cmd_agent),
+    ]

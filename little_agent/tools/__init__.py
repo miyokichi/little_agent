@@ -13,7 +13,14 @@ from little_agent.tools.shell import RunPowerShellTool
 from little_agent.tools.web import FetchUrlTool
 
 
-def default_tools() -> ToolRegistry:
+def default_tools(enabled: set[str] | None = None) -> ToolRegistry:
+    """Build the core tool registry.
+
+    ``enabled`` is an optional allowlist of tool names; when given, only core
+    tools whose name is in the set are registered. ``None`` registers all of
+    them (the default, so existing callers are unchanged).
+    """
+
     registry = ToolRegistry()
     for tool in [
         ListDirTool(),
@@ -26,7 +33,8 @@ def default_tools() -> ToolRegistry:
         RunPowerShellTool(),
         FetchUrlTool(),
     ]:
-        registry.register(tool)
+        if enabled is None or tool.name in enabled:
+            registry.register(tool)
     return registry
 
 

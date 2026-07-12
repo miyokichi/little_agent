@@ -254,6 +254,7 @@ Agentが従う手順や注意点。
 - `task_manager`: タスク、TODO、やることリストの管理
 - `workflow`: AIタスクと人間タスクを依存関係付きワークフロー（DAG）として管理・可視化
 - `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証
+- `agent_manager`: エージェントプロファイル（使うスキル・ツールの構成）の作成・管理
 - `excel_file`: `.xlsx` の読み取りと簡易作成
 - `ppt_file`: `.pptx` のテキスト読み取りと簡易作成
 - `datetime`: 現在日時・曜日・タイムゾーンの取得
@@ -302,6 +303,133 @@ little-agent
 ```text
 /exit
 ```
+
+## スラッシュコマンド
+
+`>` プロンプトで `/` から始まる入力は **スラッシュコマンド** として扱われます。コマンドは2種類あります。
+
+| 種別 | 実行者 | LLM呼び出し | 用途 | 場所 |
+| --- | --- | --- | --- | --- |
+| 制御コマンド（built-in） | CLIが直接 | しない | セッション操作・状態確認 | core（`little_agent/commands.py`） |
+| ユーザー定義コマンド（custom） | 展開して `agent.run()` へ | する | よく使うプロンプトの定型化 | `commands/*.md`（ポータブル） |
+
+入力の判定:
+
+- `/` 始まり → コマンドとして解釈
+- `//` 始まり → 先頭の `/` を1つ外した本文をそのままLLMへ送る（エスケープ）
+- それ以外 → 通常どおり `agent.run()`
+
+ディスパッチ順序は「built-in → custom → どちらも無ければ `Unknown command`」です。未知コマンドはLLMに送られません（タイプミスで無駄なAPI消費や誤動作を起こさないため）。
+
+### 制御コマンド（built-in）
+
+| コマンド | エイリアス | 動作 |
+| --- | --- | --- |
+| `/help` | `/?` | 全コマンド（built-in + custom）を説明付きで一覧 |
+| `/exit` | `/quit` | セッション終了 |
+| `/clear` | | 会話メモリをリセットして新規コンテキストにする |
+| `/skills` | | 読み込み済みSkillを一覧（`/skills <name>` で詳細） |
+| `/tools` | | 登録済みToolを一覧 |
+| `/memory` | | workspace/global メモリの現在値を表示 |
+| `/usage` | | 当セッションのtoken累計を表示 |
+| `/config` | | model・workspace・確認要否などの設定を表示 |
+| `/reload` | | `commands/*.md` を再読込（再起動不要。Skillは毎ターン自動再読込） |
+| `/agents` | | エージェントプロファイルを一覧（アクティブは `*`） |
+| `/agent` | | アクティブなエージェントを表示 / `/agent <name>` で切替（`/agent library` でライブラリ全体に戻す） |
+
+### ユーザー定義コマンド（custom）
+
+`commands/<name>.md` を置くと `/name` で使えます。探索先は2か所で、名前が衝突した場合はプロジェクトが優先されます。
+
+- プロジェクト: `{LITTLE_AGENT_WORKSPACE}/commands/`（`LITTLE_AGENT_COMMANDS_DIR` で変更可）
+- グローバル: `~/.little_agent/commands/`（`LITTLE_AGENT_GLOBAL_COMMANDS_DIR` で変更可）
+
+形式（frontmatter + 本文）:
+
+```markdown
+---
+description: 指定ファイルをレビューして改善点を優先度付きで挙げる
+---
+次のファイルを読んでコードレビューして。
+対象: $ARGUMENTS
+```
+
+引数展開:
+
+- `$ARGUMENTS` … コマンド名以降の全文字列
+- `$1` `$2` … 空白区切りの位置引数（不足分は空文字）
+- プレースホルダが1つも無く引数がある場合 … 本文末尾に引数を追記
+
+`/review little_agent/agent.py` のように呼ぶと、テンプレートを展開した本文が `agent.run()` に渡され、Skill選択・Tool・確認プロンプトは通常ターンと同じに効きます（＝プロンプトのショートカット）。
+
+同梱の例: `commands/review.md`、`commands/plan.md`、`commands/commit.md`。
+
+```text
+> /help
+> /skills workflow
+> /review little_agent/agent.py
+> /plan 新製品発表の準備
+```
+
+## エージェントの管理（プロファイル）
+
+用途ごとに **使うスキルとツールを絞ったエージェント** を定義して切り替えられます。全スキルは1か所の **ライブラリ**（`skills/`）に置き、エージェントを構成するときに選んだスキルフォルダをそこから **コピー** します（スナップショット）。
+
+### 構造
+
+```text
+skills/                     # ライブラリ: 全スキルのマスター
+agents/                     # 各エージェント（.gitignore 対象。ユーザーデータ）
+  <name>/
+    agent.json              # プロファイル（説明・model・core_tools・上書き設定）
+    skills/                 # ライブラリからコピーしたスキルフォルダ
+```
+
+有効なスキルは `agents/<name>/skills/` に存在するフォルダそのものです（唯一の真実の源）。コピーしたスキル由来のToolは自動で有効になり、コアTool（`read_file`, `run_powershell` など本体組み込み）は `agent.json` の `core_tools` 許可リストで絞れます（未指定なら全コアTool有効）。メモリToolは常に有効です。
+
+`agent.json` の例（`null` は env/既定にフォールバック）:
+
+```json
+{
+  "name": "office",
+  "description": "Excel/PowerPoint 作業用",
+  "model": null,
+  "core_tools": ["read_file", "write_file", "list_dir"],
+  "max_tool_steps": null,
+  "require_confirmation": null
+}
+```
+
+### 実行時の選択と切替
+
+- 起動時に選択: `little-agent --agent office`（または env `LITTLE_AGENT_AGENT`）
+- 引数・envの指定がなく `agents/` にプロファイルがある場合は、起動時に選択メニューを表示（`0` でライブラリ全体）
+- `agents/` が空なら従来どおりライブラリ全体（全スキル・全Tool）で起動
+- セッション中の切替: `/agents` で一覧、`/agent <name>` で切替、`/agent library` でライブラリ全体へ。切替時は会話コンテキストが新しくなります
+
+### 作成・構成（agent_manager スキル）
+
+会話からの作成・管理は `skills/agent_manager` が担当します。
+
+| Tool | 内容 | 確認 |
+| --- | --- | --- |
+| `create_agent` | ライブラリからスキルをコピーしてエージェントを作成 | 必要 |
+| `list_agents` | エージェント一覧 | 不要 |
+| `show_agent` | 1エージェントの詳細（スキル・ツール・model） | 不要 |
+| `add_agent_skill` | 既存エージェントにスキルを1つ追加コピー | 不要 |
+| `remove_agent_skill` | エージェントからスキルを削除 | 必要 |
+| `set_agent_core_tools` | コアTool許可リストを設定（省略で全部） | 不要 |
+| `delete_agent` | エージェントを削除 | 必要 |
+
+例:
+
+```text
+> Excel と PowerPoint だけ使える office というエージェントを作って
+> office に file_manager スキルを追加して
+> エージェント一覧を見せて
+```
+
+ディスク上の変更が実行中のエージェントに反映されるのは、次回起動時か `/agent <name>` での切替時です。設定は env（`LITTLE_AGENT_SKILL_LIBRARY_DIR` / `LITTLE_AGENT_AGENTS_DIR` / `LITTLE_AGENT_AGENT`）で変更できます。
 
 ## 使用例
 
@@ -451,7 +579,7 @@ AIのマウス/キーボード操作とユーザーの操作が同じカーソ�
 - **セッション一括承認**: 確認が必要なTool（`click` / `type_text` / `press_keys` など）を最初に実行するとき一度だけ確認します。承認すると **そのセッション中は再確認なし** で連続実行します。これにより「ターミナルを前面化して `y/N` を打つためのマウス操作」が不要になり、AI操作との干渉が消えます。
 - **緊急停止ホットキー**: AIが操作している間だけ有効なグローバルホットキー（既定 `Ctrl+Alt+Q`、`LITTLE_AGENT_STOP_HOTKEY` で変更可）。押すとTool実行の合間で中断し、`>` プロンプトに戻ります。プロンプト待機中はリスナーを張らないので普段の操作には干渉しません。
 - **即時停止(failsafe)**: マウスを画面の隅へ動かすと、操作の途中でも pyautogui が即アボートします。
-- 停止ホットキーには `pynput` が必要です（`pip install pynput`）。未導入でも failsafe と `Ctrl+C` は使えます。
+- 停止ホットキーは `pynput` を使います。これは中核の安全機能なので標準の依存に含まれ、`pip install -e .` で入ります。何らかの理由で使えない環境でも failsafe と `Ctrl+C` は使えます。
 
 制限・安全:
 

@@ -27,7 +27,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -58,13 +58,13 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "json-repair" },
+    { name = "pynput" },
     { name = "python-dotenv" },
 ]
 
 [package.optional-dependencies]
 control = [
     { name = "pyautogui" },
-    { name = "pynput" },
 ]
 dev = [
     { name = "pytest" },
@@ -80,7 +80,7 @@ requires-dist = [
     { name = "mss", marker = "extra == 'screen'", specifier = ">=9.0" },
     { name = "pillow", marker = "extra == 'screen'", specifier = ">=10.0" },
     { name = "pyautogui", marker = "extra == 'control'", specifier = ">=0.9.54" },
-    { name = "pynput", marker = "extra == 'control'", specifier = ">=1.7" },
+    { name = "pynput", specifier = ">=1.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
 ]
