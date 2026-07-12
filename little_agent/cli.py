@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
-from pathlib import Path
+from dataclasses import replace
 from typing import Any
 
+from little_agent import agents
 from little_agent.agent import Agent
+from little_agent.agents import AgentProfile
+from little_agent.commands import CommandContext, CommandRegistry
 from little_agent.config import AgentConfig
 from little_agent.control import StopController
 from little_agent.skills.loader import SkillLoader
@@ -24,18 +28,118 @@ def _make_confirm(stop_hotkey: str):
     return _confirm
 
 
-def main() -> None:
+def build_agent(
+    config: AgentConfig,
+    profile: AgentProfile | None,
+    confirm,
+    stop: StopController,
+) -> Agent:
+    """Construct an Agent for a profile, or for the full library when None.
+
+    Profile overrides (model / max_tool_steps / require_confirmation) are layered
+    onto the base config; ``core_tools`` filters the built-in core tools; and the
+    skill loader is pointed at the agent's own copied skills directory.
+    """
+
+    if profile is not None:
+        skills_dir = profile.skills_dir
+        effective = replace(
+            config,
+            model=profile.model or config.model,
+            max_tool_steps=(
+                profile.max_tool_steps if profile.max_tool_steps is not None else config.max_tool_steps
+            ),
+            require_confirmation=(
+                profile.require_confirmation
+                if profile.require_confirmation is not None
+                else config.require_confirmation
+            ),
+        )
+        core_tools = profile.core_tools_set()
+    else:
+        skills_dir = config.skill_library_dir
+        effective = config
+        core_tools = None
+
+    skills = SkillLoader(skills_dir.resolve())
+    return Agent(
+        config=effective,
+        skills=skills,
+        confirm=confirm,
+        stop=stop,
+        core_tools=core_tools,
+    )
+
+
+def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> AgentProfile | None:
+    """Pick the launch agent: explicit request > env default > picker > library."""
+
+    name = requested or config.active_agent
+    if name:
+        try:
+            return agents.load_profile(config.agents_dir, name)
+        except FileNotFoundError:
+            available = agents.list_agents(config.agents_dir)
+            hint = ", ".join(available) if available else "(none)"
+            print(f"Agent '{name}' not found. Available: {hint}")
+
+    available = agents.list_agents(config.agents_dir)
+    if not available:
+        return None
+
+    print("Available agents:")
+    print("  0) (library — all skills & tools)")
+    for index, agent_name in enumerate(available, start=1):
+        print(f"  {index}) {agent_name}")
+    try:
+        choice = input("Select an agent [0]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not choice or choice == "0":
+        return None
+    if choice.isdigit() and 1 <= int(choice) <= len(available):
+        return agents.load_profile(config.agents_dir, available[int(choice) - 1])
+    if choice in available:
+        return agents.load_profile(config.agents_dir, choice)
+    print(f"Unknown selection '{choice}', using the library.")
+    return None
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="little-agent")
+    parser.add_argument("--agent", help="Name of the agent profile to run (under agents/).")
+    args = parser.parse_args(argv)
+
     config = AgentConfig.from_env()
     config.workspace.mkdir(parents=True, exist_ok=True)
-    skills = SkillLoader(Path("skills").resolve())
     stop = StopController(config.stop_hotkey)
-    agent = Agent(config=config, skills=skills, confirm=_make_confirm(config.stop_hotkey), stop=stop)
+    confirm = _make_confirm(config.stop_hotkey)
+
+    profile = _select_profile_at_launch(config, args.agent)
+    agent = build_agent(config, profile, confirm, stop)
+    registry = CommandRegistry(config.commands_dir, config.global_commands_dir)
+    ctx = CommandContext(agent=agent, registry=registry, active_agent=profile.name if profile else None)
+
+    def activate(name: str) -> str:
+        token = name.strip()
+        if token.lower() in {"library", "-", "none"}:
+            ctx.agent = build_agent(config, None, confirm, stop)
+            ctx.active_agent = None
+            return "Switched to the full skill library (no agent profile)."
+        switched = agents.load_profile(config.agents_dir, token)
+        ctx.agent = build_agent(config, switched, confirm, stop)
+        ctx.active_agent = switched.name
+        return f"Switched to agent '{switched.name}' ({len(switched.enabled_skills())} skill(s))."
+
+    ctx.activate = activate
 
     mode = "OpenAI" if config.openai_api_key else "local fallback"
     print(f"Little Agent ({mode})")
     print(f"Workspace: {config.workspace}")
+    print(f"Active agent: {ctx.active_agent or 'library (all skills & tools)'}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
-    print("Type /exit to quit.\n")
+    print("Type /help for commands, /exit to quit. /remember saves what was learned so far.\n")
 
     while True:
         try:
@@ -45,8 +149,26 @@ def main() -> None:
             break
         if not user_text:
             continue
-        if user_text in {"/exit", "/quit"}:
+
+        result = registry.dispatch(ctx, user_text)
+        if result is None:
+            print(ctx.agent.run(user_text))
+            print()
+            continue
+        if result.output is not None:
+            print(result.output)
+        if result.agent_prompt is not None:
+            print(ctx.agent.run(result.agent_prompt))
+        if result.should_exit:
             break
-        print(agent.run(user_text))
         print()
 
+    _end_session(ctx.agent)
+
+
+def _end_session(agent: Agent) -> None:
+    try:
+        if agent.end_session():
+            print("[memory] learned from this session.")
+    except Exception as exc:  # noqa: BLE001 - never let auto-learning break exit.
+        print(f"[memory] auto-learning skipped: {exc}")

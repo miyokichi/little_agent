@@ -7,6 +7,9 @@ requires-python = ">=3.10"
 dependencies = [
   "python-dotenv>=1.0.1",
   "json-repair>=0.30.0",
+  # Core safety feature: the emergency-stop hotkey (control.py) is armed on
+  # every agent turn. Degrades gracefully if the backend is unavailable.
+  "pynput>=1.7",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +22,6 @@ screen = [
 ]
 control = [
   "pyautogui>=0.9.54",
-  "pynput>=1.7",
 ]
 
 [project.scripts]

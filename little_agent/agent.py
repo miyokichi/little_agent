@@ -9,6 +9,7 @@ from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatCli
 from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory import ConversationMemory, MasterMemory
 from little_agent.messages import Message, text_content
+from little_agent.reflection import Reflector
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import UpdateGlobalMemoryTool, UpdateWorkspaceMemoryTool, default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
@@ -26,10 +27,13 @@ class Agent:
         llm: LLMClient | None = None,
         confirm: ConfirmCallback | None = None,
         stop: StopController | None = None,
+        core_tools: set[str] | None = None,
     ) -> None:
         self.config = config
         self.skills = skills
-        self.tools = tools or default_tools()
+        # ``core_tools`` is a per-agent allowlist for the built-in core tools.
+        # Skill script tools and memory tools below are always registered.
+        self.tools = tools or default_tools(core_tools)
         for tool in self.skills.load_tools():
             if tool.name not in self.tools.names():
                 self.tools.register(tool)
@@ -44,7 +48,52 @@ class Agent:
         self.global_memory = MasterMemory(config.global_memory_path)
         self.tools.register(UpdateWorkspaceMemoryTool(self.workspace_memory))
         self.tools.register(UpdateGlobalMemoryTool(self.global_memory))
+        # Auto-learning: durable profiles distilled from the session (separate
+        # from the manually-edited memory.md above).
+        self.workspace_profile = MasterMemory(config.workspace / "profile.md")
+        self.global_profile = MasterMemory(config.global_profile_path)
+        self._reflected_upto = 0
         self.logger = RunLogger(config.log_dir or (config.workspace / "logs")) if config.enable_logging else None
+
+    def end_session(self) -> bool:
+        """Distill durable profiles from the session. Call once when the session ends."""
+        return self._reflect()
+
+    def remember(self) -> bool:
+        """Manually trigger auto-learning mid-session (e.g. the /remember command)."""
+        return self._reflect()
+
+    def _reflect(self) -> bool:
+        if not self.config.enable_auto_learning:
+            return False
+        # LocalRuleClient cannot summarize; skip auto-learning without a real LLM.
+        if isinstance(self.llm, LocalRuleClient):
+            return False
+        if len(self.memory.messages) <= self._reflected_upto:
+            return False  # nothing new since the last reflection
+        reflector = Reflector(self.llm, self.config.model)
+        result = reflector.reflect(
+            self.memory.messages,
+            self.global_profile.load(),
+            self.workspace_profile.load(),
+        )
+        # Mark progress even on no-op so we don't retry the same transcript.
+        self._reflected_upto = len(self.memory.messages)
+        if result is None:
+            return False
+        new_global, new_workspace = result
+        # An empty string means "leave the existing profile untouched".
+        if new_global:
+            self.global_profile.save(new_global)
+        if new_workspace:
+            self.workspace_profile.save(new_workspace)
+        if self.logger:
+            self.logger.log_conversation(
+                "auto_learning",
+                global_updated=bool(new_global),
+                workspace_updated=bool(new_workspace),
+            )
+        return bool(new_global or new_workspace)
 
     def run(self, user_text: str) -> str:
         if self.logger:
@@ -234,11 +283,17 @@ class Agent:
 
         global_mem = self.global_memory.load()
         workspace_mem = self.workspace_memory.load()
+        global_prof = self.global_profile.load()
+        workspace_prof = self.workspace_profile.load()
         memory_section = ""
         if global_mem:
             memory_section += f"\n\n## Global Memory\n{global_mem}"
         if workspace_mem:
             memory_section += f"\n\n## Workspace Memory\n{workspace_mem}"
+        if global_prof:
+            memory_section += f"\n\n## User Profile (learned)\n{global_prof}"
+        if workspace_prof:
+            memory_section += f"\n\n## Workspace Profile (learned)\n{workspace_prof}"
 
         content = (
             "You are Little Agent, a Windows-friendly Python agent system. "

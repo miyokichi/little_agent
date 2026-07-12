@@ -134,29 +134,65 @@ skills/<skill_name>/
 
 この構成にすると、`skills/<skill_name>` フォルダをコピーするだけでSkillの説明、Tool定義、実行ロジックをまとめて移動できます。
 
-### タスク管理仕様
+### プロジェクト/タスク管理仕様（AI+人間統合）
 
-タスク管理は `skills/task_manager` のポータブルSkillとして実装されています。core側にはタスク管理のロジックを持たせず、以下のSkill Script Toolを `skills/task_manager/tools.json` から読み込みます。
+`skills/project_manager` は、単発TODOから **AIタスクと人間タスクの依存関係付きワークフロー（DAG）** まで、プロジェクト単位で一元管理するポータブルSkillです。旧 `task_manager`（単発TODO）と旧 `workflow`（DAG）を統合したもので、プロジェクトやタスクの設定は **AI（本Skillのツール）と人間（ビューア）の両方** から行えます。
 
 | Tool | 内容 | 確認 |
 | --- | --- | --- |
-| `add_task` | タスクを `data/tasks.json` に追加 | 不要 |
-| `list_tasks` | タスク一覧を表示 | 不要 |
-| `complete_task` | タスクを完了にする | 不要 |
-| `delete_task` | タスクを削除 | 必要 |
+| `create_project` | プロジェクトを作成（タスクDAGの一括登録も可） | 不要 |
+| `add_task` | タスクを追加（`project_id` なしなら Inbox へ） | 不要 |
+| `update_task` | タスクの内容を編集（タイトル、担当、期限、優先度、依存） | 不要 |
+| `update_task_status` | タスクの状態と結果を記録 | 不要 |
+| `add_task_comment` | タスクに進捗コメントを追記 | 不要 |
+| `show_project` | 詳細と着手可能（READY）タスクを表示 | 不要 |
+| `list_projects` | プロジェクト一覧と進捗を表示 | 不要 |
+| `list_tasks` | 全プロジェクト横断のタスク一覧 | 不要 |
+| `delete_task` | タスクを削除（他タスクの依存参照も除去） | 必要 |
+| `delete_project` | プロジェクトを削除 | 必要 |
+| `open_project_viewer` | ブラウザのビューア/エディタを起動 | 不要 |
 
-タスクは `data/tasks.json` に保存されます。保存される主なフィールドは以下です。
+データは `data/projects.json` に保存されます。主なフィールド:
 
-- `id`: 8桁のタスクID
-- `title`: タスク名
-- `status`: `open` または `done`
-- `created_at`: 作成日時
-- `completed_at`: 完了日時
-- `due`: 期限または期限メモ
-- `priority`: 優先度
-- `notes`: 補足メモ
+- project: `id`（8桁）、`title`、`goal`、`status`（`active` / `done`。全タスク完了で自動的に `done`）、`inbox`（単発TODO受け皿フラグ）
+- task: `id`（8桁）、`title`、`description`、`assignee`（`ai` / `human`）、`assignee_name`（human タスクの担当者名。例: 山田さん。表示用で ai には付かない）、`status`（`pending` / `running` / `done` / `failed` / `skipped`）、`depends_on`（タスクIDの配列）、`due`、`priority`、`result`（成果の要約）、`comments`（進捗コメントの配列 `{at, via, text}`）、`created_via` / `completed_via`（`agent` / `viewer`。誰が作成/完了したか）
 
-削除は元に戻せないため、`delete_task` のみ実行前確認が必要です。
+状態のルール:
+
+- **ready（着手可能）**: `pending` かつ `depends_on` がすべて `done` または `skipped`。保存されず、表示時に導出されます。
+- AIタスクは、エージェントが作業の前後で `running` → `done`（+ `result`）を記録します。失敗時は `failed` と理由を記録します。
+- 人間タスクは承認ゲートとして機能します。ビューアの「完了にする」ボタンで完了させると、下流のタスクが ready になります。
+- 依存関係の編集はAI/人間どちらの経路でも循環（サイクル）を検証して拒否します。
+- エージェントとビューアの同時書き込みは、`data/projects.json.lock` による排他と一時ファイル + `os.replace` によるatomic writeで保護されます。
+
+旧データからの移行: 初回アクセス時に `data/workflows.json`（→ 各プロジェクト）と `data/tasks.json`（→ Inbox プロジェクト）を `data/projects.json` へ自動変換します。旧ファイルは `.bak` にリネームして退避します。
+
+### プロジェクトビューア（人間側の編集UI）
+
+`data/projects.json` をブラウザで可視化・編集するローカルWeb UIです（標準ライブラリのみ、追加依存なし）。人間はここからプロジェクトとタスクをフル操作（CRUD）できます。
+
+起動方法は2つ:
+
+```powershell
+# 手動起動
+python -m little_agent.viewer --workspace . --port 8765
+```
+
+```text
+# または会話から
+> プロジェクトのビューアを開いて
+```
+
+- URL: `http://127.0.0.1:8765/`（`LITTLE_AGENT_VIEWER_PORT` で変更可）
+- 表示: タスクのDAG図（Mermaid。ステータス色分け、AI=矩形 / 人間=平行四辺形、readyな人間タスクは琥珀色で強調）、「あなた待ち」パネル（readyな人間タスクと完了ボタン）、タスク詳細、全タスク一覧
+- 編集: 「＋プロジェクト」でプロジェクト作成、「＋タスク」でタスク追加、行のダブルクリック（または詳細の「編集」）でタスク編集ダイアログ（タイトル、説明、担当、担当者名、状態、期限、優先度、依存タスクのチェックボックス）、タスク削除、プロジェクト削除
+- 担当者名: human タスクは「担当者名（任意）」に名前（例: 山田さん）を入れると、一覧・図・詳細で「👤 山田さん」と表示されます（担当を AI にすると名前欄は隠れ、値もクリアされます）
+- 進捗コメント: タスク詳細ペインにコメント欄があり、人間（`via=viewer`）とエージェント（`add_task_comment`, `via=agent`）が時系列でメモを残せます。ポーリング再描画中も入力中の下書きは保持されます
+- ビューアからの変更は `created_via` / `completed_via` が `viewer` として記録され、エージェント側は次のターンで `show_project` により最新状態を把握します
+- 約1.5秒間隔のポーリングで、エージェントの進捗がライブ反映されます
+- バインドは `127.0.0.1` のみで、外部からはアクセスできません
+- Mermaid はCDNから読み込みます。オフライン時は図の代わりに依存関係付きリスト表示へ自動フォールバックします（編集機能はオフラインでも動作します）
+- 停止は、手動起動なら `Ctrl+C`。会話から起動した場合はバックグラウンド常駐なので、タスクマネージャで該当の `python` プロセスを終了します
 
 ### PowerShell実行の安全仕様
 
@@ -200,8 +236,9 @@ Agentが従う手順や注意点。
 - `file_manager`: ファイル探索・読み書き・検索
 - `python_coder`: Python実装・調査・実行確認
 - `windows_operator`: Windows/PowerShell操作
-- `task_manager`: タスク、TODO、やることリストの管理
+- `project_manager`: プロジェクト/タスクの統合管理（単発TODOから依存関係付きDAGまで、AI/人間の両方から編集可能）
 - `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証
+- `agent_manager`: エージェントプロファイル（使うスキル・ツールの構成）の作成・管理
 - `excel_file`: `.xlsx` の読み取りと簡易作成
 - `ppt_file`: `.pptx` のテキスト読み取りと簡易作成
 - `datetime`: 現在日時・曜日・タイムゾーンの取得
@@ -251,6 +288,133 @@ little-agent
 /exit
 ```
 
+## スラッシュコマンド
+
+`>` プロンプトで `/` から始まる入力は **スラッシュコマンド** として扱われます。コマンドは2種類あります。
+
+| 種別 | 実行者 | LLM呼び出し | 用途 | 場所 |
+| --- | --- | --- | --- | --- |
+| 制御コマンド（built-in） | CLIが直接 | しない | セッション操作・状態確認 | core（`little_agent/commands.py`） |
+| ユーザー定義コマンド（custom） | 展開して `agent.run()` へ | する | よく使うプロンプトの定型化 | `commands/*.md`（ポータブル） |
+
+入力の判定:
+
+- `/` 始まり → コマンドとして解釈
+- `//` 始まり → 先頭の `/` を1つ外した本文をそのままLLMへ送る（エスケープ）
+- それ以外 → 通常どおり `agent.run()`
+
+ディスパッチ順序は「built-in → custom → どちらも無ければ `Unknown command`」です。未知コマンドはLLMに送られません（タイプミスで無駄なAPI消費や誤動作を起こさないため）。
+
+### 制御コマンド（built-in）
+
+| コマンド | エイリアス | 動作 |
+| --- | --- | --- |
+| `/help` | `/?` | 全コマンド（built-in + custom）を説明付きで一覧 |
+| `/exit` | `/quit` | セッション終了 |
+| `/clear` | | 会話メモリをリセットして新規コンテキストにする |
+| `/skills` | | 読み込み済みSkillを一覧（`/skills <name>` で詳細） |
+| `/tools` | | 登録済みToolを一覧 |
+| `/memory` | | workspace/global メモリの現在値を表示 |
+| `/usage` | | 当セッションのtoken累計を表示 |
+| `/config` | | model・workspace・確認要否などの設定を表示 |
+| `/reload` | | `commands/*.md` を再読込（再起動不要。Skillは毎ターン自動再読込） |
+| `/agents` | | エージェントプロファイルを一覧（アクティブは `*`） |
+| `/agent` | | アクティブなエージェントを表示 / `/agent <name>` で切替（`/agent library` でライブラリ全体に戻す） |
+
+### ユーザー定義コマンド（custom）
+
+`commands/<name>.md` を置くと `/name` で使えます。探索先は2か所で、名前が衝突した場合はプロジェクトが優先されます。
+
+- プロジェクト: `{LITTLE_AGENT_WORKSPACE}/commands/`（`LITTLE_AGENT_COMMANDS_DIR` で変更可）
+- グローバル: `~/.little_agent/commands/`（`LITTLE_AGENT_GLOBAL_COMMANDS_DIR` で変更可）
+
+形式（frontmatter + 本文）:
+
+```markdown
+---
+description: 指定ファイルをレビューして改善点を優先度付きで挙げる
+---
+次のファイルを読んでコードレビューして。
+対象: $ARGUMENTS
+```
+
+引数展開:
+
+- `$ARGUMENTS` … コマンド名以降の全文字列
+- `$1` `$2` … 空白区切りの位置引数（不足分は空文字）
+- プレースホルダが1つも無く引数がある場合 … 本文末尾に引数を追記
+
+`/review little_agent/agent.py` のように呼ぶと、テンプレートを展開した本文が `agent.run()` に渡され、Skill選択・Tool・確認プロンプトは通常ターンと同じに効きます（＝プロンプトのショートカット）。
+
+同梱の例: `commands/review.md`、`commands/plan.md`、`commands/commit.md`。
+
+```text
+> /help
+> /skills project_manager
+> /review little_agent/agent.py
+> /plan 新製品発表の準備
+```
+
+## エージェントの管理（プロファイル）
+
+用途ごとに **使うスキルとツールを絞ったエージェント** を定義して切り替えられます。全スキルは1か所の **ライブラリ**（`skills/`）に置き、エージェントを構成するときに選んだスキルフォルダをそこから **コピー** します（スナップショット）。
+
+### 構造
+
+```text
+skills/                     # ライブラリ: 全スキルのマスター
+agents/                     # 各エージェント（.gitignore 対象。ユーザーデータ）
+  <name>/
+    agent.json              # プロファイル（説明・model・core_tools・上書き設定）
+    skills/                 # ライブラリからコピーしたスキルフォルダ
+```
+
+有効なスキルは `agents/<name>/skills/` に存在するフォルダそのものです（唯一の真実の源）。コピーしたスキル由来のToolは自動で有効になり、コアTool（`read_file`, `run_powershell` など本体組み込み）は `agent.json` の `core_tools` 許可リストで絞れます（未指定なら全コアTool有効）。メモリToolは常に有効です。
+
+`agent.json` の例（`null` は env/既定にフォールバック）:
+
+```json
+{
+  "name": "office",
+  "description": "Excel/PowerPoint 作業用",
+  "model": null,
+  "core_tools": ["read_file", "write_file", "list_dir"],
+  "max_tool_steps": null,
+  "require_confirmation": null
+}
+```
+
+### 実行時の選択と切替
+
+- 起動時に選択: `little-agent --agent office`（または env `LITTLE_AGENT_AGENT`）
+- 引数・envの指定がなく `agents/` にプロファイルがある場合は、起動時に選択メニューを表示（`0` でライブラリ全体）
+- `agents/` が空なら従来どおりライブラリ全体（全スキル・全Tool）で起動
+- セッション中の切替: `/agents` で一覧、`/agent <name>` で切替、`/agent library` でライブラリ全体へ。切替時は会話コンテキストが新しくなります
+
+### 作成・構成（agent_manager スキル）
+
+会話からの作成・管理は `skills/agent_manager` が担当します。
+
+| Tool | 内容 | 確認 |
+| --- | --- | --- |
+| `create_agent` | ライブラリからスキルをコピーしてエージェントを作成 | 必要 |
+| `list_agents` | エージェント一覧 | 不要 |
+| `show_agent` | 1エージェントの詳細（スキル・ツール・model） | 不要 |
+| `add_agent_skill` | 既存エージェントにスキルを1つ追加コピー | 不要 |
+| `remove_agent_skill` | エージェントからスキルを削除 | 必要 |
+| `set_agent_core_tools` | コアTool許可リストを設定（省略で全部） | 不要 |
+| `delete_agent` | エージェントを削除 | 必要 |
+
+例:
+
+```text
+> Excel と PowerPoint だけ使える office というエージェントを作って
+> office に file_manager スキルを追加して
+> エージェント一覧を見せて
+```
+
+ディスク上の変更が実行中のエージェントに反映されるのは、次回起動時か `/agent <name>` での切替時です。設定は env（`LITTLE_AGENT_SKILL_LIBRARY_DIR` / `LITTLE_AGENT_AGENTS_DIR` / `LITTLE_AGENT_AGENT`）で変更できます。
+
 ## 使用例
 
 ```text
@@ -260,6 +424,10 @@ little-agent
 > PowerShellでPythonのバージョンを確認して
 > 明日までに請求書を確認するタスクを追加して
 > 未完了タスクを見せて
+> 新製品発表の準備をプロジェクトにして。私のレビューを間に挟んで
+> プロジェクトのビューアを開いて
+> 資料収集が終わったので done にして
+> t2の期限を金曜にして、担当を私に変えて
 > reports/sales.xlsx の中身を読んで
 > 箇条書きから deck/plan.pptx を作って
 ```
@@ -287,6 +455,33 @@ logs/
 
 token数は、OpenAI互換APIが `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` を返す場合はその値を記録します。`usage` が返らない互換APIやローカルフォールバックでは、文字数から概算した値を `estimated: true` として記録します。
 
+### メモリと自動学習
+
+Little Agent には2種類の永続メモリがあります。
+
+**手動メモリ（memory.md）** — LLMが `update_workspace_memory` / `update_global_memory` ツールで明示的に書き込みます。
+
+| ファイル | 範囲 |
+| --- | --- |
+| `{workspace}/memory.md` | そのワークスペース専用 |
+| `~/.little_agent/memory.md`（`LITTLE_AGENT_GLOBAL_MEMORY_PATH`） | 全ワークスペース共通 |
+
+**自動学習プロファイル（profile.md）** — セッションの内容（依頼・成果・傾向）から、恒久的に再利用できる知識を自動抽出して蓄積します。追記ではなく毎回マージ・要約するため、無制限には肥大しません。
+
+| ファイル | 範囲 | 内容 |
+| --- | --- | --- |
+| `{workspace}/profile.md` | ワークスペース | プロジェクト固有のエッセンス・決定・慣習 |
+| `~/.little_agent/profile.md`（`LITTLE_AGENT_GLOBAL_PROFILE_PATH`） | 全体 | ユーザーの好み・作業スタイル・繰り返す意図 |
+
+memory.md と profile.md はいずれも次回以降のsystem promptに自動で差し込まれます。
+
+抽出のタイミング（ハイブリッド）:
+
+- セッション終了時（`/exit` や Ctrl+C）に自動実行
+- `/remember` コマンドで任意のタイミングに手動実行
+
+抽出はLLMを使うため、`OPENAI_API_KEY` が設定されているときのみ動作します（ローカルフォールバック時はスキップ）。`LITTLE_AGENT_AUTO_LEARNING=false` で無効化できます。保存は確認なしの自動です。
+
 ### Skill作成支援
 
 `skills/skill_creator` は、Little Agent用Skillの作成を支援するポータブルSkillです。
@@ -302,7 +497,7 @@ token数は、OpenAI互換APIが `usage.prompt_tokens`、`usage.completion_token
 
 ```text
 > メール整理用のSkillを作って。scriptsとtools.jsonも含めて
-> skill_creatorで task_manager を検証して
+> skill_creatorで project_manager を検証して
 ```
 
 ### OfficeファイルSkill
@@ -396,7 +591,7 @@ AIのマウス/キーボード操作とユーザーの操作が同じカーソ�
 - **セッション一括承認**: 確認が必要なTool（`click` / `type_text` / `press_keys` など）を最初に実行するとき一度だけ確認します。承認すると **そのセッション中は再確認なし** で連続実行します。これにより「ターミナルを前面化して `y/N` を打つためのマウス操作」が不要になり、AI操作との干渉が消えます。
 - **緊急停止ホットキー**: AIが操作している間だけ有効なグローバルホットキー（既定 `Ctrl+Alt+Q`、`LITTLE_AGENT_STOP_HOTKEY` で変更可）。押すとTool実行の合間で中断し、`>` プロンプトに戻ります。プロンプト待機中はリスナーを張らないので普段の操作には干渉しません。
 - **即時停止(failsafe)**: マウスを画面の隅へ動かすと、操作の途中でも pyautogui が即アボートします。
-- 停止ホットキーには `pynput` が必要です（`pip install pynput`）。未導入でも failsafe と `Ctrl+C` は使えます。
+- 停止ホットキーは `pynput` を使います。これは中核の安全機能なので標準の依存に含まれ、`pip install -e .` で入ります。何らかの理由で使えない環境でも failsafe と `Ctrl+C` は使えます。
 
 制限・安全:
 
@@ -427,7 +622,6 @@ python -m pytest -q
 
 - Tool実行後にLLMへ戻すmulti-step loopは最小構成です
 - PowerShell安全ガードは簡易的です
-- 長期記憶は未実装です
 - 複数エージェントの協調は未実装です
 - Web検索Toolは抽象化候補として未実装です
 
@@ -437,5 +631,6 @@ python -m pytest -q
 - 会話ログの保存
 - Skillのembedding検索
 - 許可制PowerShell runner
-- GUIまたはWeb UI
+- GUIまたはWeb UI（プロジェクトビューアは実装済み。汎用の会話UIは未実装）
+- readyなAIタスクをエージェントが順に自動実行するワークフローのオーケストレーション
 - 複数agentのrole分担
