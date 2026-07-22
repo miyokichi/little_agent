@@ -194,6 +194,44 @@ python -m little_agent.viewer --workspace . --port 8765
 - Mermaid はCDNから読み込みます。オフライン時は図の代わりに依存関係付きリスト表示へ自動フォールバックします（編集機能はオフラインでも動作します）
 - 停止は、手動起動なら `Ctrl+C`。会話から起動した場合はバックグラウンド常駐なので、タスクマネージャで該当の `python` プロセスを終了します
 
+### ファイルシステム型タスクハーネス（人間×AI）
+
+`skills/workspace_harness` は、`project_manager` の JSON DB とは別方向の、**ディレクトリ構造そのものをタスクの真実の源にする**ハーネスです。タスク1つ=1フォルダ（`task.md` を持つ）として扱い、人間とAIが同じフォルダ上で協働します。両者は併存でき、フォルダを直接見ながら進めたい運用にはこちらが向きます。
+
+ディレクトリ規約:
+
+```text
+tasks/                        # ハーネスroot（LITTLE_AGENT_TASKS_DIR で変更可）
+  <area>/                     # 上位エリア（区分）。★人間が統制する領域★
+    <task-slug>/              # タスク1つ = 1フォルダ
+      task.md                 # 定義（front matter + 目的 + 進捗ログ）
+      outputs/                # 成果物
+      notes/                  # 作業メモ
+  PROPOSALS.md                # AIが提案した新エリア（人間が判断して作る）
+shared/                       # 共通資料（LITTLE_AGENT_SHARED_DIR で変更可）
+```
+
+役割分担の要点:
+
+- **上位エリアは人間が統制**します。AIはエリアを作成・改名・削除しません。既存エリアが合わないときは `propose_area` が `tasks/PROPOSALS.md` に提案を記録するだけで、フォルダは人間が作ります。
+- **タスクフォルダはAIも作れます**。既存エリア内なら `create_task_folder` で直接作成（実行前確認あり）。承認前提の提案タスクは `status: proposed` で作り、人間がOKしたら `todo` に上げます。
+- **共通資料はAIが自律探索**します。タスク着手時に `search_shared` が `shared/` をファイル名・本文横断で検索し、`read_shared` で確認、`update_task_folder` の `materials_add` で task.md に紐づけます。
+- `task.md` は人間もAIも編集でき、`status`（`todo`/`doing`/`review`/`blocked`/`done`/`cancelled`/`proposed`）や進捗ログを両者が読み書きして協働します。
+
+| Tool | 内容 | 確認 |
+| --- | --- | --- |
+| `harness_overview` | エリア一覧・各タスクの状態・共通資料・提案を俯瞰 | 不要 |
+| `list_task_folders` | タスクフォルダを一覧（area/status で絞り込み） | 不要 |
+| `read_task_folder` | task.md とフォルダ内容を表示 | 不要 |
+| `create_task_folder` | 既存エリア内にタスクフォルダを作成（新エリアは拒否） | 必要 |
+| `update_task_folder` | status/担当/期限/tags/材料リンクを更新 | 不要 |
+| `add_task_note` | task.md の進捗ログに追記 | 不要 |
+| `propose_area` | 新しい上位エリアを提案として記録（作成はしない） | 不要 |
+| `search_shared` | 共通資料フォルダを自律検索 | 不要 |
+| `read_shared` | 共通資料のテキストファイルを読む | 不要 |
+
+保存先は `LITTLE_AGENT_TASKS_DIR`（既定 `tasks`）と `LITTLE_AGENT_SHARED_DIR`（既定 `shared`。ワークスペース外の絶対パスも可）で変更できます。同梱の `tasks/README.md` と `tasks/example/` が規約の見本です。
+
 ### PowerShell実行の安全仕様
 
 `run_powershell` はワークスペースをカレントディレクトリとして実行します。以下のような破壊的・危険なトークンを含むコマンドは簡易ガードでブロックします。
@@ -237,6 +275,7 @@ Agentが従う手順や注意点。
 - `python_coder`: Python実装・調査・実行確認
 - `windows_operator`: Windows/PowerShell操作
 - `project_manager`: プロジェクト/タスクの統合管理（単発TODOから依存関係付きDAGまで、AI/人間の両方から編集可能）
+- `workspace_harness`: ファイルシステム型タスクハーネス（タスク=フォルダ。上位エリアは人間が統制、AIはタスク作成/提案と共通資料の自律探索）
 - `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証
 - `agent_manager`: エージェントプロファイル（使うスキル・ツールの構成）の作成・管理
 - `excel_file`: `.xlsx` の読み取りと簡易作成
@@ -268,6 +307,8 @@ LITTLE_AGENT_REQUIRE_CONFIRMATION=true
 LITTLE_AGENT_MAX_TOOL_STEPS=5
 LITTLE_AGENT_ENABLE_LOGGING=true
 LITTLE_AGENT_LOG_DIR=logs
+LITTLE_AGENT_TASKS_DIR=tasks
+LITTLE_AGENT_SHARED_DIR=shared
 ```
 
 ## 起動
