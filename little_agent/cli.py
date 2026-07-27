@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import replace
 from typing import Any
 
 from little_agent import agents
 from little_agent.agent import Agent
-from little_agent.agents import AgentProfile
 from little_agent.commands import CommandContext, CommandRegistry
 from little_agent.config import AgentConfig
 from little_agent.control import StopController
-from little_agent.skills.loader import SkillLoader
-from little_agent.tools.delegation import DelegateTaskTool
+from little_agent.factory import build_agent
 
 
 def _make_confirm(stop_hotkey: str):
@@ -29,63 +26,7 @@ def _make_confirm(stop_hotkey: str):
     return _confirm
 
 
-def build_agent(
-    config: AgentConfig,
-    profile: AgentProfile,
-    confirm,
-    stop: StopController,
-    depth: int = 0,
-) -> Agent:
-    """Construct an Agent for a profile (use agents.default_profile for the library).
-
-    Profile overrides (model / max_tool_steps / require_confirmation) are layered
-    onto the base config; ``core_tools`` filters the built-in core tools; and the
-    skill loader is pointed at the profile's skills directory.
-
-    ``depth`` is the delegation depth: the agent gets a ``delegate_task`` tool that
-    spawns sub-agents (each at ``depth + 1``) until ``config.max_delegation_depth``
-    is reached, at which point no further delegation tool is registered.
-    """
-
-    effective = replace(
-        config,
-        model=profile.model or config.model,
-        max_tool_steps=(
-            profile.max_tool_steps if profile.max_tool_steps is not None else config.max_tool_steps
-        ),
-        require_confirmation=(
-            profile.require_confirmation
-            if profile.require_confirmation is not None
-            else config.require_confirmation
-        ),
-    )
-    skills = SkillLoader(profile.skills_dir.resolve())
-    agent = Agent(
-        config=effective,
-        skills=skills,
-        confirm=confirm,
-        stop=stop,
-        core_tools=profile.core_tools_set(),
-    )
-
-    if depth < config.max_delegation_depth:
-        def spawn(agent_name: str | None):
-            sub_profile = agents.resolve_active(config, agent_name)
-            # Sub-agents share the stop flag but never touch the parent's listener.
-            return build_agent(config, sub_profile, confirm, stop.child(), depth + 1)
-
-        agent.tools.register(
-            DelegateTaskTool(
-                spawn=spawn,
-                available_agents=lambda: agents.list_agents(config.agents_dir),
-                depth=depth,
-                max_depth=config.max_delegation_depth,
-            )
-        )
-    return agent
-
-
-def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> AgentProfile:
+def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> agents.AgentProfile:
     """Pick the launch agent: explicit request > env default > picker > default."""
 
     name = requested or config.active_agent
@@ -123,7 +64,32 @@ def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> Age
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="little-agent")
     parser.add_argument("--agent", help="Name of the agent profile to run (under agents/).")
+    parser.add_argument(
+        "--serve-a2a",
+        action="store_true",
+        help="Serve this agent over the A2A protocol instead of starting the interactive CLI.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="A2A bind address (with --serve-a2a).")
+    parser.add_argument("--port", type=int, help="A2A port (with --serve-a2a).")
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="With --serve-a2a: allow tools that normally require confirmation.",
+    )
     args = parser.parse_args(argv)
+
+    if args.serve_a2a:
+        from little_agent.a2a import serve as a2a_serve
+
+        serve_argv: list[str] = ["--host", args.host]
+        if args.agent:
+            serve_argv += ["--agent", args.agent]
+        if args.port is not None:
+            serve_argv += ["--port", str(args.port)]
+        if args.auto_approve:
+            serve_argv.append("--auto-approve")
+        a2a_serve.main(serve_argv)
+        return
 
     config = AgentConfig.from_env()
     config.workspace.mkdir(parents=True, exist_ok=True)
@@ -183,3 +149,9 @@ def _end_session(agent: Agent) -> None:
             print("[memory] learned from this session.")
     except Exception as exc:  # noqa: BLE001 - never let auto-learning break exit.
         print(f"[memory] auto-learning skipped: {exc}")
+    try:
+        from little_agent.a2a.peers import shutdown_shared
+
+        shutdown_shared()  # stop any local A2A servers started for delegation
+    except Exception as exc:  # noqa: BLE001 - never let cleanup break exit.
+        print(f"[a2a] peer shutdown skipped: {exc}")

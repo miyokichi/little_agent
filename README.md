@@ -86,6 +86,7 @@ Toolは `little_agent/tools` に実装します。各Toolは次の属性とメ�
 | `write_file` | UTF-8テキストファイルを書く | 必要 |
 | `search_files` | ワークスペース内の文字列検索 | 不要 |
 | `run_powershell` | PowerShellコマンドを実行 | 必要 |
+| `delegate_task` | サブタスクをA2Aで別のエージェントに委譲（[A2Aの節](#a2aagent2agentプロトコル)） | 必要 |
 
 すべてのファイル操作は `LITTLE_AGENT_WORKSPACE` の内側に制限されます。
 
@@ -458,30 +459,63 @@ agents/                     # 各エージェント（.gitignore 対象。ユー
 
 ディスク上の変更が実行中のエージェントに反映されるのは、次回起動時か `/agent <name>` での切替時です。設定は env（`LITTLE_AGENT_SKILL_LIBRARY_DIR` / `LITTLE_AGENT_AGENTS_DIR` / `LITTLE_AGENT_AGENT`）で変更できます。
 
-### サブエージェントへの委譲（delegate_task）
+## A2A（Agent2Agent）プロトコル
 
-実行中のエージェントが、**その場で新しいエージェントを立ち上げてサブタスクを丸ごと委譲**できます（プロセス内。agent-to-agentプロトコルではありません）。委譲されたサブエージェントは**まっさらなコンテキスト**で自律的に走り、最終結果だけを親に返します。長い調査や独立した作業を親の会話コンテキストから切り離したいとき、特定のエージェントプロファイルに専門作業を任せたいときに使います。
+Little Agent は **A2A プロトコル**を双方向に話します。エージェント同士の連携は独自方式ではなく、Agent Card による発見と JSON-RPC 2.0 によるタスク実行という標準の手順に載っています。そのため、**Little Agent 以外のA2A対応エージェントとも相互運用**できます。
 
-`delegate_task` は組み込みのコアToolで、`build_agent` が起動時に自動登録します（`/tools` に出ます）。
+実装は標準ライブラリのみ（`urllib` / `http.server`）で、追加依存はありません。
+
+| 対応範囲 | 内容 |
+| --- | --- |
+| プロトコル版 | `0.3.0`（`protocolVersion`） |
+| Agent Card | `/.well-known/agent-card.json`（旧 `/.well-known/agent.json` も配信） |
+| トランスポート | JSON-RPC 2.0 over HTTP（`preferredTransport: JSONRPC`） |
+| メソッド | `message/send`、`tasks/get`、`tasks/cancel` |
+| タスク状態 | `submitted` / `working` / `completed` / `canceled` / `failed` |
+| 未対応 | `message/stream`（SSE）と push通知。Agent Card で `streaming: false` と正直に宣言し、要求時は `-32004 UnsupportedOperation` を返します |
+
+### サーバとして公開する
+
+エージェントをA2Aサーバとして起動すると、他のエージェント（他フレームワーク含む）から呼べるようになります。
+
+```powershell
+little-agent --serve-a2a --agent office --port 8801
+# または
+python -m little_agent.a2a.serve --agent office --port 8801
+```
+
+- Agent Card の `skills` には、そのプロファイルが持つ Little Agent スキルがそのまま公開されます。
+- **タスクごとに新しいエージェントを構築**するので、A2Aタスク間でコンテキストは混ざりません。
+- `tasks/cancel` はそのタスクの停止フラグを立て、**Tool実行の合間でエージェントを中断**させます（緊急停止ホットキーと同じ仕組み）。
+
+### クライアントとして委譲する（delegate_task）
+
+コアToolの `delegate_task` がA2Aクライアントです。Agent Cardを取得し、`message/send` を送り、`tasks/get` で終了状態までポーリングして、成果物（artifact）のテキストを親に返します。
 
 | 引数 | 内容 |
 | --- | --- |
-| `task` | サブエージェントへの完結した指示（会話履歴は引き継がれないので必要な情報を全部入れる） |
-| `agent` | 任意。走らせるエージェントプロファイル名（`agents/` 配下）。省略すると `default`（ライブラリ全体） |
+| `task` | 相手エージェントへの完結した指示（会話は共有されないので必要な情報を全部入れる） |
+| `agent` | 任意。ローカルのプロファイル名、または設定済みリモートピア名。省略すると `default` |
+| `agent_url` | 任意。A2Aエージェントのベースを直接指定（例 `http://127.0.0.1:8801/`）。`agent` より優先 |
 | `background` | 任意。作業前に渡す前提・素材 |
 
-動作と安全:
+委譲先の解決:
 
-- サブエージェントは自分専用の会話メモリ・ログ（`logs/` に別セッションIDで記録）を持ちます。親の会話は汚れません。
-- サブエージェントの危険Tool（`write_file`, `run_powershell` など）は、サブエージェント側で改めて確認プロンプトが出ます（承認は親と共有しません）。
-- 緊急停止ホットキーは親が一括管理し、押すとネストした委譲ごと中断します。
-- 無限委譲を防ぐため深さ制限があります。`LITTLE_AGENT_MAX_DELEGATION_DEPTH`（既定 `2`、`0` で委譲を無効化）で調整します。
+- **リモートピア** … `LITTLE_AGENT_A2A_PEERS`（`name=url,name2=url2` 形式）に登録したエージェント、または `agent_url` で直接指定したエージェント。相手はA2A準拠であれば実装は問いません。
+- **ローカルプロファイル** … `agents/` のプロファイル名を渡すと、**初回の委譲時にローカルのA2Aサーバを空きポートで自動起動**し、以降のセッション中は再利用します（終了時に自動停止）。サーバを手動で立てなくても、やり取りは実際のプロトコル上を通ります。
+
+安全:
+
+- サーバは既定で `127.0.0.1` のみにバインドします。`LITTLE_AGENT_A2A_TOKEN` を設定すると Bearer トークン必須になり、Agent Card の `securitySchemes` に公開されます。
+- サーバ側には確認プロンプトを出せる人間がいないため、**確認が必要なTool（`write_file`, `run_powershell` など）は既定で拒否**します。許可するには `--auto-approve` または `LITTLE_AGENT_A2A_AUTO_APPROVE=true` を明示します。
+- 委譲の深さは message の metadata（`littleAgent/delegationDepth`）で相手に伝わり、無限の連鎖を防ぎます。`LITTLE_AGENT_MAX_DELEGATION_DEPTH`（既定 `2`、`0` で委譲を無効化）で調整します。
 
 例:
 
 ```text
-> 競合3社の最新プレスリリースを調べて要点をまとめる作業を、サブエージェントに任せて
+> 競合3社の最新プレスリリースを調べて要点をまとめる作業を、別のエージェントに委譲して
 > このExcelの集計は office エージェントに委譲してやって
+> http://127.0.0.1:8801/ のエージェントにこの下書きのレビューを頼んで
 ```
 
 ## 使用例
@@ -691,7 +725,8 @@ python -m pytest -q
 
 - Tool実行後にLLMへ戻すmulti-step loopは最小構成です
 - PowerShell安全ガードは簡易的です
-- 複数エージェントの協調は `delegate_task` によるサブエージェント委譲まで（同時並列実行やメッセージ往復はなく、逐次委譲）
+- A2Aはブロッキング＋ポーリングのみ（`message/stream` のSSEとpush通知は未対応。Agent Cardで `streaming: false` と宣言）
+- 複数エージェントの協調は `delegate_task` による逐次委譲まで（同時並列の委譲や、タスクを跨いだ対話の継続は未対応）
 - Web検索Toolは抽象化候補として未実装です
 
 ## 次の実装候補
@@ -702,4 +737,4 @@ python -m pytest -q
 - 許可制PowerShell runner
 - GUIまたはWeb UI（プロジェクトビューアは実装済み。汎用の会話UIは未実装）
 - readyなAIタスクをエージェントが順に自動実行するワークフローのオーケストレーション
-- 複数agentのrole分担（`delegate_task` で逐次委譲は実装済み。並列実行やagent間メッセージ往復は今後）
+- 複数agentのrole分担（A2Aの `delegate_task` で逐次委譲は実装済み。並列委譲、`message/stream` のSSE対応、push通知は今後）

@@ -1,32 +1,27 @@
-"""Delegate a subtask to a freshly launched, autonomous sub-agent.
+"""Delegate a subtask to a peer agent over the A2A (Agent2Agent) protocol.
 
-The parent agent calls ``delegate_task`` with a self-contained instruction; the
-tool spawns a brand-new agent (optionally a specific ``agents/`` profile), runs
-it to completion with its own clean context, and returns the sub-agent's final
-answer. This is in-process delegation — no agent-to-agent protocol — which keeps
-long or specialized subtasks out of the parent's context window and lets focused
-agent profiles handle work they are configured for.
+``delegate_task`` is an A2A **client**: it discovers the peer's Agent Card, sends
+``message/send``, polls ``tasks/get`` until the task reaches a terminal state,
+and returns the resulting artifact text.
 
-The tool is wired up by the CLI's ``build_agent`` (which owns the sub-agent
-factory and the recursion depth), so constructing an ``Agent`` directly — as the
-tests do — never gets a delegation tool unless one is registered explicitly.
+The peer can be any A2A-compliant agent reachable by URL, or a local ``agents/``
+profile — in which case a local A2A server is started on demand (see
+``little_agent.a2a.peers``) so the hand-off still goes over the real protocol.
+Delegation depth travels in the message metadata, so a chain of hand-offs
+between Little Agents cannot recurse forever.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol
+from typing import Any
 
+from little_agent.a2a.client import A2AClientError
+from little_agent.a2a.models import TASK_COMPLETED, task_result_text
+from little_agent.a2a.peers import PeerPool, shared_pool
+from little_agent.config import AgentConfig
 from little_agent.tools.base import ToolContext, ToolResult
 
-
-class _Runnable(Protocol):
-    def run(self, user_text: str) -> str: ...
-
-
-# Build a fresh sub-agent for the given profile name (None = default library).
-SpawnCallback = Callable[[str | None], _Runnable]
-# List the agent profile names currently available (for hints/validation).
-AvailableAgentsCallback = Callable[[], list[str]]
+DEFAULT_TASK_TIMEOUT = 300.0
 
 
 class DelegateTaskTool:
@@ -38,20 +33,27 @@ class DelegateTaskTool:
             "task": {
                 "type": "string",
                 "description": (
-                    "Full, self-contained instructions for the sub-agent. It has no memory of "
+                    "Full, self-contained instructions for the peer agent. It does not share "
                     "this conversation, so include every detail it needs to finish on its own."
                 ),
             },
             "agent": {
                 "type": "string",
                 "description": (
-                    "Optional agent profile name to run (see agents/). Omit to use the full "
-                    "default library."
+                    "Peer to delegate to: a local agent profile name or a configured remote "
+                    "peer name. Omit for the default library agent."
+                ),
+            },
+            "agent_url": {
+                "type": "string",
+                "description": (
+                    "Base URL of an A2A agent to delegate to (e.g. http://127.0.0.1:8801/). "
+                    "Overrides 'agent'. Use for peers not in the configured list."
                 ),
             },
             "background": {
                 "type": "string",
-                "description": "Optional background or source material to give the sub-agent before the task.",
+                "description": "Optional background or source material to send before the task.",
             },
         },
         "required": ["task"],
@@ -60,65 +62,77 @@ class DelegateTaskTool:
 
     def __init__(
         self,
-        spawn: SpawnCallback,
-        available_agents: AvailableAgentsCallback | None = None,
+        config: AgentConfig,
         depth: int = 0,
-        max_depth: int = 2,
+        pool: PeerPool | None = None,
+        timeout: float = DEFAULT_TASK_TIMEOUT,
     ) -> None:
-        self._spawn = spawn
-        self._available = available_agents or (list)
+        self._config = config
         self._depth = depth
-        self._max_depth = max_depth
+        self._pool = pool or shared_pool(config)
+        self._timeout = timeout
         self.description = self._build_description()
 
     def _build_description(self) -> str:
         base = (
-            "Delegate a self-contained subtask to a freshly launched sub-agent that runs "
-            "autonomously with its own clean context and returns its final result. Use it for "
-            "focused, delegable chunks of work (research, drafting, a file or data operation), "
-            "or to hand a task to a specialized agent profile. The sub-agent cannot see this "
-            "conversation, so put everything it needs in 'task'."
+            "Delegate a self-contained subtask to a peer agent over the A2A (Agent2Agent) "
+            "protocol and return its result. The peer runs the task independently with its own "
+            "context, so put everything it needs in 'task'. Use it for focused, delegable work "
+            "(research, drafting, a file or data operation) or to hand a task to a specialized agent."
         )
         try:
-            names = self._available()
+            names = self._pool.available()
         except Exception:  # noqa: BLE001 - description must never fail to build.
             names = []
         if names:
-            base += " Available agent profiles: " + ", ".join(names) + " (omit 'agent' for the default library)."
-        else:
-            base += " No specialized profiles exist yet; omit 'agent' to use the default library."
+            base += " Available peers: " + ", ".join(names) + "."
         return base
 
     def run(self, context: ToolContext, **kwargs: Any) -> ToolResult:
-        task = str(kwargs.get("task") or "").strip()
-        if not task:
+        task_text = str(kwargs.get("task") or "").strip()
+        if not task_text:
             return ToolResult(False, "task is required.")
-        if self._depth >= self._max_depth:
+        if self._depth >= self._config.max_delegation_depth:
             return ToolResult(
                 False,
-                f"Delegation depth limit ({self._max_depth}) reached. Do this work directly "
-                "instead of delegating further.",
+                f"Delegation depth limit ({self._config.max_delegation_depth}) reached. "
+                "Do this work directly instead of delegating further.",
             )
 
         agent_name = str(kwargs.get("agent") or "").strip() or None
-        extra = str(kwargs.get("background") or "").strip()
+        agent_url = str(kwargs.get("agent_url") or "").strip() or None
+        background = str(kwargs.get("background") or "").strip()
+
         try:
-            sub_agent = self._spawn(agent_name)
+            client = self._pool.connect(name=agent_name, url=agent_url)
         except FileNotFoundError:
-            available = ", ".join(self._available()) or "(none)"
+            available = ", ".join(self._pool.available()) or "(none)"
             return ToolResult(
                 False,
-                f"No such agent profile: {agent_name}. Available: {available}. "
-                "Omit 'agent' to use the default library.",
+                f"No such agent profile: {agent_name}. Available peers: {available}. "
+                "Omit 'agent' to use the default library agent.",
             )
+        except A2AClientError as exc:
+            return ToolResult(False, f"Could not connect to the peer agent: {exc}")
         except Exception as exc:  # noqa: BLE001 - surfaced to the parent as tool failure text.
-            return ToolResult(False, f"Could not launch sub-agent: {exc}")
+            return ToolResult(False, f"Could not reach the peer agent: {exc}")
 
-        prompt = task if not extra else f"Background:\n{extra}\n\n---\nTask:\n{task}"
+        prompt = task_text if not background else f"Background:\n{background}\n\n---\nTask:\n{task_text}"
         try:
-            result = sub_agent.run(prompt)
+            result = client.run_task(prompt, depth=self._depth + 1, timeout=self._timeout)
+        except A2AClientError as exc:
+            return ToolResult(False, f"A2A task failed: {exc}")
         except Exception as exc:  # noqa: BLE001 - surfaced to the parent as tool failure text.
-            return ToolResult(False, f"Sub-agent run failed: {exc}")
+            return ToolResult(False, f"A2A task failed: {exc}")
 
-        label = agent_name or "default"
-        return ToolResult(True, f"[sub-agent '{label}' result]\n{result}")
+        label = agent_url or agent_name or client.name
+        output = task_result_text(result) or "(peer returned no content)"
+        if result.get("kind") == "message":
+            return ToolResult(True, f"[A2A peer '{label}' replied]\n{output}")
+
+        state = str((result.get("status") or {}).get("state") or "unknown")
+        if state != TASK_COMPLETED:
+            return ToolResult(
+                False, f"[A2A peer '{label}' task {state}]\n{output}"
+            )
+        return ToolResult(True, f"[A2A peer '{label}' result]\n{output}")

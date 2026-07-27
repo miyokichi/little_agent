@@ -1,12 +1,26 @@
+"""End-to-end tests for A2A delegation.
+
+These drive a **real** A2A server over HTTP with the real client, so the Agent
+Card, JSON-RPC envelope, and task lifecycle are all exercised for real.
+"""
+
 from __future__ import annotations
 
+import json
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from little_agent import agents
-from little_agent.cli import build_agent
+from little_agent.a2a import models
+from little_agent.a2a.client import A2AClient, A2AClientError, fetch_agent_card
+from little_agent.a2a.peers import PeerPool, parse_peers
+from little_agent.a2a.server import A2AService, serve
 from little_agent.config import AgentConfig
+from little_agent.factory import build_agent
 from little_agent.control import StopController
 from little_agent.tools.base import ToolContext
 from little_agent.tools.delegation import DelegateTaskTool
@@ -14,13 +28,19 @@ from little_agent.tools.delegation import DelegateTaskTool
 LIBRARY = Path("skills").resolve()
 
 
-class FakeAgent:
-    def __init__(self, reply: str = "done") -> None:
+class ScriptedAgent:
+    """Stands in for a real Agent inside the A2A server."""
+
+    def __init__(self, reply: str = "done", block: threading.Event | None = None) -> None:
         self.reply = reply
+        self.block = block
         self.prompts: list[str] = []
+        self.depth: int | None = None
 
     def run(self, user_text: str) -> str:
         self.prompts.append(user_text)
+        if self.block is not None:
+            self.block.wait(5)
         return self.reply
 
 
@@ -38,64 +58,319 @@ def _config(workspace: Path, agents_dir: Path, max_depth: int = 2) -> AgentConfi
     )
 
 
-class DelegateToolUnitTests(unittest.TestCase):
-    def test_runs_sub_agent_and_returns_result(self) -> None:
-        fake = FakeAgent("finished the research")
-        tool = DelegateTaskTool(spawn=lambda name: fake)
-        result = tool.run(ToolContext(Path.cwd()), task="research X", background="use Y")
+def _card(port: int, name: str = "test-agent", requires_auth: bool = False) -> dict:
+    return models.agent_card(
+        name=name,
+        description="test",
+        url=f"http://127.0.0.1:{port}/",
+        version="0.1.0",
+        skills=[models.agent_skill("general", "general", "general help")],
+        requires_auth=requires_auth,
+    )
 
-        self.assertTrue(result.ok)
-        self.assertIn("finished the research", result.content)
-        # Context is prepended and the sub-agent receives a self-contained prompt.
-        self.assertIn("research X", fake.prompts[0])
-        self.assertIn("use Y", fake.prompts[0])
 
-    def test_empty_task_is_rejected(self) -> None:
-        tool = DelegateTaskTool(spawn=lambda name: FakeAgent())
-        self.assertFalse(tool.run(ToolContext(Path.cwd()), task="  ").ok)
+class ServedAgent:
+    """Context manager running an A2AService on a real loopback port."""
+
+    def __init__(self, agent, token: str | None = None, grace: float = 2.0) -> None:
+        self._agent = agent
+        self._token = token
+        self._grace = grace
+        self.depths: list[int] = []
+
+    def __enter__(self) -> "ServedAgent":
+        def factory(depth, stop):
+            self.depths.append(depth)
+            self._agent.depth = depth
+            self._agent.stop = stop
+            return self._agent
+
+        self.service = A2AService(
+            _card(0, requires_auth=bool(self._token)),
+            factory,
+            token=self._token,
+            grace_seconds=self._grace,
+        )
+        # Bind port 0, then publish the real port in the card the client reads.
+        self.httpd = serve(self.service, "127.0.0.1", 0)
+        self.port = self.httpd.server_address[1]
+        self.base_url = f"http://127.0.0.1:{self.port}/"
+        self.service.card["url"] = self.base_url
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class AgentCardTests(unittest.TestCase):
+    def test_card_served_at_canonical_and_legacy_paths(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            for path in (models.AGENT_CARD_PATH, models.LEGACY_AGENT_CARD_PATH):
+                with urllib.request.urlopen(served.base_url.rstrip("/") + path, timeout=5) as resp:
+                    card = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(card["protocolVersion"], models.PROTOCOL_VERSION)
+                self.assertEqual(card["preferredTransport"], "JSONRPC")
+                self.assertIn("skills", card)
+                # Streaming is genuinely unimplemented, so it must not be advertised.
+                self.assertFalse(card["capabilities"]["streaming"])
+
+    def test_client_discovers_card(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            card = fetch_agent_card(served.base_url)
+            self.assertEqual(card["name"], "test-agent")
+
+
+class MessageSendTests(unittest.TestCase):
+    def test_task_completes_and_returns_artifact(self) -> None:
+        agent = ScriptedAgent("the answer is 42")
+        with ServedAgent(agent) as served:
+            client = A2AClient.connect(served.base_url)
+            task = client.run_task("what is the answer?")
+
+            self.assertEqual(task["kind"], "task")
+            self.assertEqual(task["status"]["state"], models.TASK_COMPLETED)
+            self.assertEqual(models.task_result_text(task), "the answer is 42")
+            self.assertEqual(agent.prompts, ["what is the answer?"])
+
+    def test_depth_travels_in_message_metadata(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            client = A2AClient.connect(served.base_url)
+            client.run_task("go", depth=2)
+            self.assertEqual(served.depths, [2])
+
+    def test_tasks_get_returns_the_same_task(self) -> None:
+        with ServedAgent(ScriptedAgent("ok")) as served:
+            client = A2AClient.connect(served.base_url)
+            task = client.run_task("go")
+            fetched = client.get_task(task["id"])
+            self.assertEqual(fetched["id"], task["id"])
+            self.assertEqual(fetched["status"]["state"], models.TASK_COMPLETED)
+
+    def test_agent_failure_becomes_failed_task(self) -> None:
+        class Boom:
+            def run(self, _text):
+                raise RuntimeError("kaboom")
+
+        with ServedAgent(Boom()) as served:
+            client = A2AClient.connect(served.base_url)
+            task = client.run_task("go")
+            self.assertEqual(task["status"]["state"], models.TASK_FAILED)
+            self.assertIn("kaboom", models.task_result_text(task))
+
+    def test_long_task_returns_non_terminal_then_polls_to_completion(self) -> None:
+        gate = threading.Event()
+        agent = ScriptedAgent("slow result", block=gate)
+        # Grace of 0 forces message/send to hand back a working task to poll.
+        with ServedAgent(agent, grace=0.0) as served:
+            client = A2AClient.connect(served.base_url)
+            first = client.send_message("go")
+            self.assertIn(first["status"]["state"], {models.TASK_SUBMITTED, models.TASK_WORKING})
+            gate.set()
+            task = client.run_task("go2")
+            self.assertEqual(task["status"]["state"], models.TASK_COMPLETED)
+
+
+class CancelTests(unittest.TestCase):
+    def test_cancel_marks_task_canceled_and_trips_stop(self) -> None:
+        gate = threading.Event()
+        agent = ScriptedAgent("never used", block=gate)
+        with ServedAgent(agent, grace=0.0) as served:
+            client = A2AClient.connect(served.base_url)
+            task = client.send_message("long job")
+            canceled = client.cancel_task(task["id"])
+
+            self.assertEqual(canceled["status"]["state"], models.TASK_CANCELED)
+            # The served agent's stop controller is tripped, which is what aborts
+            # a real Agent between tool calls.
+            self.assertTrue(agent.stop.triggered)
+            gate.set()
+
+    def test_cancel_unknown_task_returns_task_not_found(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            client = A2AClient.connect(served.base_url)
+            with self.assertRaises(A2AClientError) as caught:
+                client.cancel_task("does-not-exist")
+            self.assertIn(str(models.TASK_NOT_FOUND), str(caught.exception))
+
+    def test_cancel_completed_task_is_rejected(self) -> None:
+        with ServedAgent(ScriptedAgent("fast")) as served:
+            client = A2AClient.connect(served.base_url)
+            task = client.run_task("go")
+            with self.assertRaises(A2AClientError) as caught:
+                client.cancel_task(task["id"])
+            self.assertIn(str(models.TASK_NOT_CANCELABLE), str(caught.exception))
+
+
+class ProtocolErrorTests(unittest.TestCase):
+    def _post(self, base_url: str, payload: dict) -> dict:
+        request = urllib.request.Request(
+            base_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def test_unknown_method(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            body = self._post(
+                served.base_url, {"jsonrpc": "2.0", "id": 1, "method": "nope", "params": {}}
+            )
+            self.assertEqual(body["error"]["code"], models.METHOD_NOT_FOUND)
+            self.assertEqual(body["id"], 1)
+
+    def test_streaming_reports_unsupported_operation(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            body = self._post(
+                served.base_url,
+                {"jsonrpc": "2.0", "id": 2, "method": "message/stream", "params": {}},
+            )
+            self.assertEqual(body["error"]["code"], models.UNSUPPORTED_OPERATION)
+
+    def test_wrong_jsonrpc_version(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            body = self._post(served.base_url, {"jsonrpc": "1.0", "id": 3, "method": "tasks/get"})
+            self.assertEqual(body["error"]["code"], models.INVALID_REQUEST)
+
+    def test_message_without_text_part_is_rejected(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            body = self._post(
+                served.base_url,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "message/send",
+                    "params": {"message": {"kind": "message", "role": "user", "parts": []}},
+                },
+            )
+            self.assertEqual(body["error"]["code"], models.CONTENT_TYPE_NOT_SUPPORTED)
+
+
+class AuthTests(unittest.TestCase):
+    def test_token_required_when_configured(self) -> None:
+        with ServedAgent(ScriptedAgent(), token="s3cret") as served:
+            # The card stays public so peers can learn how to authenticate.
+            card = fetch_agent_card(served.base_url)
+            self.assertIn("securitySchemes", card)
+
+            with self.assertRaises(A2AClientError):
+                A2AClient(card).run_task("go")
+
+            authorized = A2AClient(card, token="s3cret")
+            self.assertEqual(authorized.run_task("go")["status"]["state"], models.TASK_COMPLETED)
+
+
+class DelegateToolTests(unittest.TestCase):
+    def test_delegates_over_a2a_to_a_url(self) -> None:
+        agent = ScriptedAgent("peer finished the research")
+        with TemporaryDirectory() as tmp, ServedAgent(agent) as served:
+            root = Path(tmp)
+            config = _config(root, root / "agents")
+            tool = DelegateTaskTool(config=config, depth=0, pool=PeerPool(config))
+            result = tool.run(
+                ToolContext(root), task="research X", background="use Y", agent_url=served.base_url
+            )
+
+            self.assertTrue(result.ok, result.content)
+            self.assertIn("peer finished the research", result.content)
+            self.assertIn("research X", agent.prompts[0])
+            self.assertIn("use Y", agent.prompts[0])
+            # The parent's depth+1 is what the peer is told to run at.
+            self.assertEqual(served.depths, [1])
+
+    def test_empty_task_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, root / "agents")
+            tool = DelegateTaskTool(config=config, pool=PeerPool(config))
+            self.assertFalse(tool.run(ToolContext(root), task="  ").ok)
 
     def test_depth_limit_blocks_further_delegation(self) -> None:
-        tool = DelegateTaskTool(spawn=lambda name: FakeAgent(), depth=2, max_depth=2)
-        result = tool.run(ToolContext(Path.cwd()), task="anything")
-        self.assertFalse(result.ok)
-        self.assertIn("depth limit", result.content)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, root / "agents", max_depth=2)
+            tool = DelegateTaskTool(config=config, depth=2, pool=PeerPool(config))
+            result = tool.run(ToolContext(root), task="anything")
+            self.assertFalse(result.ok)
+            self.assertIn("depth limit", result.content)
 
-    def test_unknown_agent_lists_available(self) -> None:
-        def spawn(name):
-            raise FileNotFoundError(name)
+    def test_unreachable_peer_reports_cleanly(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, root / "agents")
+            tool = DelegateTaskTool(config=config, pool=PeerPool(config))
+            result = tool.run(
+                ToolContext(root), task="t", agent_url="http://127.0.0.1:9/"
+            )
+            self.assertFalse(result.ok)
+            self.assertIn("peer", result.content.lower())
 
-        tool = DelegateTaskTool(spawn=spawn, available_agents=lambda: ["office", "coder"])
-        result = tool.run(ToolContext(Path.cwd()), task="t", agent="ghost")
-        self.assertFalse(result.ok)
-        self.assertIn("office", result.content)
-        self.assertIn("coder", result.content)
+    def test_failed_peer_task_surfaces_as_tool_error(self) -> None:
+        class Boom:
+            def run(self, _text):
+                raise RuntimeError("peer exploded")
 
-    def test_description_lists_profiles(self) -> None:
-        tool = DelegateTaskTool(spawn=lambda name: FakeAgent(), available_agents=lambda: ["office"])
-        self.assertIn("office", tool.description)
+        with TemporaryDirectory() as tmp, ServedAgent(Boom()) as served:
+            root = Path(tmp)
+            config = _config(root, root / "agents")
+            tool = DelegateTaskTool(config=config, pool=PeerPool(config))
+            result = tool.run(ToolContext(root), task="t", agent_url=served.base_url)
+            self.assertFalse(result.ok)
+            self.assertIn("peer exploded", result.content)
 
 
-class StopControllerChildTests(unittest.TestCase):
-    def test_child_shares_trigger_flag(self) -> None:
-        parent = StopController("<ctrl>+<alt>+q")
-        child = parent.child()
-        # A stop during the sub-agent's run must be visible to the parent too.
-        parent._on_activate()
-        self.assertTrue(parent.triggered)
-        self.assertTrue(child.triggered)
+class PeerRegistryTests(unittest.TestCase):
+    def test_parse_named_and_bare_urls(self) -> None:
+        peers = parse_peers("office=http://127.0.0.1:8801/, http://example.com:9000/")
+        self.assertEqual(peers["office"], "http://127.0.0.1:8801/")
+        self.assertIn("example.com-9000", peers)
 
-    def test_child_reset_is_noop(self) -> None:
-        parent = StopController("<ctrl>+<alt>+q")
-        child = parent.child()
-        parent._on_activate()
-        child.reset()  # sub-agent's Agent.run() calls reset(); it must not clear the parent's flag
-        self.assertTrue(parent.triggered)
+    def test_empty_input(self) -> None:
+        self.assertEqual(parse_peers(None), {})
+        self.assertEqual(parse_peers("  "), {})
 
-    def test_child_arm_does_not_register_listener(self) -> None:
-        parent = StopController("<ctrl>+<alt>+q")
-        child = parent.child()
-        child.arm()  # must stay a no-op: the parent owns the single listener
-        self.assertIsNone(child._listener)
+    def test_available_includes_local_profiles(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents_dir = root / "agents"
+            agents.create_agent(agents_dir, LIBRARY, "office", skills=["datetime"])
+            pool = PeerPool(_config(root, agents_dir))
+            self.assertIn("office", pool.available())
+            self.assertIn(agents.DEFAULT_AGENT_NAME, pool.available())
+
+    def test_unknown_local_profile_raises_before_spawning(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pool = PeerPool(_config(root, root / "agents"))
+            with self.assertRaises(FileNotFoundError):
+                pool.connect(name="does-not-exist")
+
+
+class LocalSpawnTests(unittest.TestCase):
+    """Spawning a real local A2A server subprocess for a profile.
+
+    Only the spawn/discovery path is exercised (no task is sent), so the test
+    never reaches an LLM even when the environment has API credentials.
+    """
+
+    def test_local_profile_is_served_and_discoverable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents_dir = root / "agents"
+            agents.create_agent(agents_dir, LIBRARY, "helper", skills=["datetime"])
+            pool = PeerPool(_config(root, agents_dir))
+            try:
+                client = pool.connect(name="helper")
+                self.assertEqual(client.name, "little-agent/helper")
+                # The profile's skills are advertised on the card.
+                self.assertIn("datetime", [s["id"] for s in client.card["skills"]])
+                # A second connect reuses the already-running server.
+                self.assertEqual(pool.connect(name="helper").endpoint, client.endpoint)
+            finally:
+                pool.shutdown()
 
 
 class BuildAgentDelegationTests(unittest.TestCase):
@@ -103,29 +378,28 @@ class BuildAgentDelegationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = _config(root, root / "agents")
-            stop = StopController(config.stop_hotkey)
-            agent = build_agent(config, agents.default_profile(config), lambda *_: True, stop)
+            agent = build_agent(
+                config, agents.default_profile(config), lambda *_: True, StopController("x")
+            )
             self.assertIn("delegate_task", agent.tools.names())
 
-    def test_delegate_tool_absent_when_depth_disabled(self) -> None:
+    def test_delegate_tool_absent_at_depth_limit(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, root / "agents", max_depth=2)
+            agent = build_agent(
+                config, agents.default_profile(config), lambda *_: True, StopController("x"), depth=2
+            )
+            self.assertNotIn("delegate_task", agent.tools.names())
+
+    def test_delegation_can_be_disabled(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = _config(root, root / "agents", max_depth=0)
-            stop = StopController(config.stop_hotkey)
-            agent = build_agent(config, agents.default_profile(config), lambda *_: True, stop)
+            agent = build_agent(
+                config, agents.default_profile(config), lambda *_: True, StopController("x")
+            )
             self.assertNotIn("delegate_task", agent.tools.names())
-
-    def test_spawned_sub_agent_runs_and_returns_text(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = _config(root, root / "agents")
-            stop = StopController(config.stop_hotkey)
-            agent = build_agent(config, agents.default_profile(config), lambda *_: True, stop)
-            tool = agent.tools.get("delegate_task")
-            # No API key -> LocalRuleClient, so the sub-agent runs without network.
-            result = tool.run(ToolContext(config.workspace), task="list the current directory")
-            self.assertTrue(result.ok, result.content)
-            self.assertIn("sub-agent 'default' result", result.content)
 
 
 if __name__ == "__main__":

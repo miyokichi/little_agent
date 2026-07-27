@@ -16,36 +16,22 @@ class StopController:
     the pyautogui mouse-corner failsafe or Ctrl+C.
     """
 
-    def __init__(self, hotkey: str, _event: threading.Event | None = None, _child: bool = False) -> None:
+    def __init__(self, hotkey: str) -> None:
         self.hotkey = hotkey
-        # Sub-agents share the parent's event so one hotkey press aborts the whole
-        # nested run, but they must not touch the parent's listener lifecycle.
-        self._event = _event if _event is not None else threading.Event()
-        self._child = _child
+        self._event = threading.Event()
         self._listener: object | None = None
         self._available: bool | None = None
-
-    def child(self) -> "StopController":
-        """A view for a sub-agent: shares ``triggered`` but never (dis)arms/resets.
-
-        The parent owns the single hotkey listener for the whole nested run, so a
-        delegated sub-agent only observes the shared stop flag and leaves the
-        listener lifecycle untouched.
-        """
-        return StopController(self.hotkey, _event=self._event, _child=True)
 
     @property
     def triggered(self) -> bool:
         return self._event.is_set()
 
     def reset(self) -> None:
-        if self._child:
-            return
         self._event.clear()
 
     def arm(self) -> None:
         """Start listening for the stop hotkey. No-op if already armed."""
-        if self._child or self._listener is not None:
+        if self._listener is not None:
             return
         try:
             from pynput import keyboard
@@ -68,8 +54,6 @@ class StopController:
 
     def disarm(self) -> None:
         """Stop listening for the stop hotkey."""
-        if self._child:
-            return
         listener = self._listener
         self._listener = None
         if listener is not None:
