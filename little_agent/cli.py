@@ -12,6 +12,7 @@ from little_agent.commands import CommandContext, CommandRegistry
 from little_agent.config import AgentConfig
 from little_agent.control import StopController
 from little_agent.skills.loader import SkillLoader
+from little_agent.tools.delegation import DelegateTaskTool
 
 
 def _make_confirm(stop_hotkey: str):
@@ -33,12 +34,17 @@ def build_agent(
     profile: AgentProfile,
     confirm,
     stop: StopController,
+    depth: int = 0,
 ) -> Agent:
     """Construct an Agent for a profile (use agents.default_profile for the library).
 
     Profile overrides (model / max_tool_steps / require_confirmation) are layered
     onto the base config; ``core_tools`` filters the built-in core tools; and the
     skill loader is pointed at the profile's skills directory.
+
+    ``depth`` is the delegation depth: the agent gets a ``delegate_task`` tool that
+    spawns sub-agents (each at ``depth + 1``) until ``config.max_delegation_depth``
+    is reached, at which point no further delegation tool is registered.
     """
 
     effective = replace(
@@ -54,13 +60,29 @@ def build_agent(
         ),
     )
     skills = SkillLoader(profile.skills_dir.resolve())
-    return Agent(
+    agent = Agent(
         config=effective,
         skills=skills,
         confirm=confirm,
         stop=stop,
         core_tools=profile.core_tools_set(),
     )
+
+    if depth < config.max_delegation_depth:
+        def spawn(agent_name: str | None):
+            sub_profile = agents.resolve_active(config, agent_name)
+            # Sub-agents share the stop flag but never touch the parent's listener.
+            return build_agent(config, sub_profile, confirm, stop.child(), depth + 1)
+
+        agent.tools.register(
+            DelegateTaskTool(
+                spawn=spawn,
+                available_agents=lambda: agents.list_agents(config.agents_dir),
+                depth=depth,
+                max_depth=config.max_delegation_depth,
+            )
+        )
+    return agent
 
 
 def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> AgentProfile:
