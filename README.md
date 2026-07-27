@@ -86,6 +86,8 @@ Toolは `little_agent/tools` に実装します。各Toolは次の属性とメ�
 | `write_file` | UTF-8テキストファイルを書く | 必要 |
 | `search_files` | ワークスペース内の文字列検索 | 不要 |
 | `run_powershell` | PowerShellコマンドを実行 | 必要 |
+| `delegate_task` | サブタスク1件をA2Aで別のエージェントに委譲（[A2Aの節](#a2aagent2agentプロトコル)） | 必要 |
+| `delegate_tasks` | 独立した複数サブタスクをA2Aで**並列**委譲 | 必要 |
 
 すべてのファイル操作は `LITTLE_AGENT_WORKSPACE` の内側に制限されます。
 
@@ -194,6 +196,44 @@ python -m little_agent.viewer --workspace . --port 8765
 - Mermaid はCDNから読み込みます。オフライン時は図の代わりに依存関係付きリスト表示へ自動フォールバックします（編集機能はオフラインでも動作します）
 - 停止は、手動起動なら `Ctrl+C`。会話から起動した場合はバックグラウンド常駐なので、タスクマネージャで該当の `python` プロセスを終了します
 
+### ファイルシステム型タスクハーネス（人間×AI）
+
+`skills/workspace_harness` は、`project_manager` の JSON DB とは別方向の、**ディレクトリ構造そのものをタスクの真実の源にする**ハーネスです。タスク1つ=1フォルダ（`task.md` を持つ）として扱い、人間とAIが同じフォルダ上で協働します。両者は併存でき、フォルダを直接見ながら進めたい運用にはこちらが向きます。
+
+ディレクトリ規約:
+
+```text
+tasks/                        # ハーネスroot（LITTLE_AGENT_TASKS_DIR で変更可）
+  <area>/                     # 上位エリア（区分）。★人間が統制する領域★
+    <task-slug>/              # タスク1つ = 1フォルダ
+      task.md                 # 定義（front matter + 目的 + 進捗ログ）
+      outputs/                # 成果物
+      notes/                  # 作業メモ
+  PROPOSALS.md                # AIが提案した新エリア（人間が判断して作る）
+shared/                       # 共通資料（LITTLE_AGENT_SHARED_DIR で変更可）
+```
+
+役割分担の要点:
+
+- **上位エリアは人間が統制**します。AIはエリアを作成・改名・削除しません。既存エリアが合わないときは `propose_area` が `tasks/PROPOSALS.md` に提案を記録するだけで、フォルダは人間が作ります。
+- **タスクフォルダはAIも作れます**。既存エリア内なら `create_task_folder` で直接作成（実行前確認あり）。承認前提の提案タスクは `status: proposed` で作り、人間がOKしたら `todo` に上げます。
+- **共通資料はAIが自律探索**します。タスク着手時に `search_shared` が `shared/` をファイル名・本文横断で検索し、`read_shared` で確認、`update_task_folder` の `materials_add` で task.md に紐づけます。
+- `task.md` は人間もAIも編集でき、`status`（`todo`/`doing`/`review`/`blocked`/`done`/`cancelled`/`proposed`）や進捗ログを両者が読み書きして協働します。
+
+| Tool | 内容 | 確認 |
+| --- | --- | --- |
+| `harness_overview` | エリア一覧・各タスクの状態・共通資料・提案を俯瞰 | 不要 |
+| `list_task_folders` | タスクフォルダを一覧（area/status で絞り込み） | 不要 |
+| `read_task_folder` | task.md とフォルダ内容を表示 | 不要 |
+| `create_task_folder` | 既存エリア内にタスクフォルダを作成（新エリアは拒否） | 必要 |
+| `update_task_folder` | status/担当/期限/tags/材料リンクを更新 | 不要 |
+| `add_task_note` | task.md の進捗ログに追記 | 不要 |
+| `propose_area` | 新しい上位エリアを提案として記録（作成はしない） | 不要 |
+| `search_shared` | 共通資料フォルダを自律検索 | 不要 |
+| `read_shared` | 共通資料のテキストファイルを読む | 不要 |
+
+保存先は `LITTLE_AGENT_TASKS_DIR`（既定 `tasks`）と `LITTLE_AGENT_SHARED_DIR`（既定 `shared`。ワークスペース外の絶対パスも可）で変更できます。同梱の `tasks/README.md` と `tasks/example/` が規約の見本です。
+
 ### PowerShell実行の安全仕様
 
 `run_powershell` はワークスペースをカレントディレクトリとして実行します。以下のような破壊的・危険なトークンを含むコマンドは簡易ガードでブロックします。
@@ -237,6 +277,7 @@ Agentが従う手順や注意点。
 - `python_coder`: Python実装・調査・実行確認
 - `windows_operator`: Windows/PowerShell操作
 - `project_manager`: プロジェクト/タスクの統合管理（単発TODOから依存関係付きDAGまで、AI/人間の両方から編集可能）
+- `workspace_harness`: ファイルシステム型タスクハーネス（タスク=フォルダ。上位エリアは人間が統制、AIはタスク作成/提案と共通資料の自律探索）
 - `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証
 - `agent_manager`: エージェントプロファイル（使うスキル・ツールの構成）の作成・管理
 - `excel_file`: `.xlsx` の読み取りと簡易作成
@@ -268,6 +309,8 @@ LITTLE_AGENT_REQUIRE_CONFIRMATION=true
 LITTLE_AGENT_MAX_TOOL_STEPS=5
 LITTLE_AGENT_ENABLE_LOGGING=true
 LITTLE_AGENT_LOG_DIR=logs
+LITTLE_AGENT_TASKS_DIR=tasks
+LITTLE_AGENT_SHARED_DIR=shared
 ```
 
 ## 起動
@@ -416,6 +459,76 @@ agents/                     # 各エージェント（.gitignore 対象。ユー
 ```
 
 ディスク上の変更が実行中のエージェントに反映されるのは、次回起動時か `/agent <name>` での切替時です。設定は env（`LITTLE_AGENT_SKILL_LIBRARY_DIR` / `LITTLE_AGENT_AGENTS_DIR` / `LITTLE_AGENT_AGENT`）で変更できます。
+
+## A2A（Agent2Agent）プロトコル
+
+Little Agent は **A2A プロトコル**を双方向に話します。エージェント同士の連携は独自方式ではなく、Agent Card による発見と JSON-RPC 2.0 によるタスク実行という標準の手順に載っています。そのため、**Little Agent 以外のA2A対応エージェントとも相互運用**できます。
+
+実装は標準ライブラリのみ（`urllib` / `http.server`）で、追加依存はありません。
+
+| 対応範囲 | 内容 |
+| --- | --- |
+| プロトコル版 | `0.3.0`（`protocolVersion`） |
+| Agent Card | `/.well-known/agent-card.json`（旧 `/.well-known/agent.json` も配信） |
+| トランスポート | JSON-RPC 2.0 over HTTP（`preferredTransport: JSONRPC`） |
+| メソッド | `message/send`、`tasks/get`、`tasks/cancel` |
+| タスク状態 | `submitted` / `working` / `completed` / `canceled` / `failed` |
+| 未対応 | `message/stream`（SSE）と push通知。Agent Card で `streaming: false` と正直に宣言し、要求時は `-32004 UnsupportedOperation` を返します |
+
+### サーバとして公開する
+
+エージェントをA2Aサーバとして起動すると、他のエージェント（他フレームワーク含む）から呼べるようになります。
+
+```powershell
+little-agent --serve-a2a --agent office --port 8801
+# または
+python -m little_agent.a2a.serve --agent office --port 8801
+```
+
+- Agent Card の `skills` には、そのプロファイルが持つ Little Agent スキルがそのまま公開されます。
+- **タスクごとに新しいエージェントを構築**するので、A2Aタスク間でコンテキストは混ざりません。
+- `tasks/cancel` はそのタスクの停止フラグを立て、**Tool実行の合間でエージェントを中断**させます（緊急停止ホットキーと同じ仕組み）。
+
+### クライアントとして委譲する（delegate_task / delegate_tasks）
+
+コアToolの `delegate_task`（1件）と `delegate_tasks`（複数を並列）がA2Aクライアントです。Agent Cardを取得し、`message/send` を送り、`tasks/get` で終了状態までポーリングして、成果物（artifact）のテキストを親に返します。
+
+`delegate_task` の引数:
+
+| 引数 | 内容 |
+| --- | --- |
+| `task` | 相手エージェントへの完結した指示（会話は共有されないので必要な情報を全部入れる） |
+| `agent` | 任意。ローカルのプロファイル名、または設定済みリモートピア名。省略すると `default` |
+| `agent_url` | 任意。A2Aエージェントのベースを直接指定（例 `http://127.0.0.1:8801/`）。`agent` より優先 |
+| `background` | 任意。作業前に渡す前提・素材 |
+
+`delegate_tasks` は `tasks` に上記と同じ形のオブジェクトの配列を取り、**それぞれを独立したA2Aタスクとして同時に走らせます**。サブタスクごとに別のピアを指定できるので、「調査はAへ、集計はBへ」のような振り分けも1回の呼び出しで済みます。
+
+- 実行数の上限は `LITTLE_AGENT_MAX_PARALLEL_DELEGATIONS`（既定 `4`）。それを超える分は順に詰めて実行します。
+- 結果は**依頼した順**に `[1/3] peer '...' — completed` の形で並び、先頭に完了/失敗の件数サマリが付きます。
+- **部分失敗を許容**します。1件が失敗しても成功した結果は失われず（Tool全体は成功扱い）、全滅したときだけエラーになります。
+- 依存関係のあるサブタスク（前の結果を次で使う）を1回の `delegate_tasks` に入れてはいけません。その場合は `delegate_task` を順に呼びます。
+
+委譲先の解決:
+
+- **リモートピア** … `LITTLE_AGENT_A2A_PEERS`（`name=url,name2=url2` 形式）に登録したエージェント、または `agent_url` で直接指定したエージェント。相手はA2A準拠であれば実装は問いません。
+- **ローカルプロファイル** … `agents/` のプロファイル名を渡すと、**初回の委譲時にローカルのA2Aサーバを空きポートで自動起動**し、以降のセッション中は再利用します（終了時に自動停止）。サーバを手動で立てなくても、やり取りは実際のプロトコル上を通ります。
+
+安全:
+
+- サーバは既定で `127.0.0.1` のみにバインドします。`LITTLE_AGENT_A2A_TOKEN` を設定すると Bearer トークン必須になり、Agent Card の `securitySchemes` に公開されます。
+- サーバ側には確認プロンプトを出せる人間がいないため、**確認が必要なTool（`write_file`, `run_powershell` など）は既定で拒否**します。許可するには `--auto-approve` または `LITTLE_AGENT_A2A_AUTO_APPROVE=true` を明示します。
+- 委譲の深さは message の metadata（`littleAgent/delegationDepth`）で相手に伝わり、無限の連鎖を防ぎます。`LITTLE_AGENT_MAX_DELEGATION_DEPTH`（既定 `2`、`0` で委譲を無効化）で調整します。
+- 委譲待ちの間に**緊急停止ホットキー**を押すと、待機を打ち切って相手のタスクを `tasks/cancel` で取り消します（並列委譲では全件）。放置されたまま走り続けるピアが残りません。
+
+例:
+
+```text
+> 競合3社の最新プレスリリースを調べて要点をまとめる作業を、別のエージェントに委譲して
+> A社・B社・C社の決算を3つ並列で調べて
+> 調査は research エージェント、集計は office エージェントに並列で振って
+> http://127.0.0.1:8801/ のエージェントにこの下書きのレビューを頼んで
+```
 
 ## 使用例
 
@@ -624,7 +737,8 @@ python -m pytest -q
 
 - Tool実行後にLLMへ戻すmulti-step loopは最小構成です
 - PowerShell安全ガードは簡易的です
-- 複数エージェントの協調は未実装です
+- A2Aはブロッキング＋ポーリングのみ（`message/stream` のSSEとpush通知は未対応。Agent Cardで `streaming: false` と宣言）
+- 複数エージェントの協調は委譲まで（`delegate_tasks` の並列委譲は実装済み。タスクを跨いだ対話の継続や、ピア同士の自律的な交渉は未対応）
 - Web検索Toolは抽象化候補として未実装です
 
 ## 次の実装候補
@@ -635,4 +749,4 @@ python -m pytest -q
 - 許可制PowerShell runner
 - GUIまたはWeb UI（プロジェクトビューアは実装済み。汎用の会話UIは未実装）
 - readyなAIタスクをエージェントが順に自動実行するワークフローのオーケストレーション
-- 複数agentのrole分担
+- 複数agentのrole分担（A2Aの逐次委譲・並列委譲は実装済み。`message/stream` のSSE対応とpush通知は今後）
