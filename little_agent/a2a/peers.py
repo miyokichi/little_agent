@@ -64,6 +64,7 @@ class PeerPool:
         self._remote = parse_peers(os.getenv("LITTLE_AGENT_A2A_PEERS"))
         self._token = os.getenv("LITTLE_AGENT_A2A_TOKEN") or None
         self._lock = threading.Lock()
+        self._name_locks: dict[str, threading.Lock] = {}
         self._local: dict[str, tuple[subprocess.Popen[bytes], str]] = {}
         atexit.register(self.shutdown)
 
@@ -88,17 +89,29 @@ class PeerPool:
             return A2AClient.connect(self._remote[key], token=self._token)
         return A2AClient.connect(self._ensure_local(key), token=self._token)
 
+    def _name_lock(self, name: str) -> threading.Lock:
+        with self._lock:
+            lock = self._name_locks.get(name)
+            if lock is None:
+                lock = threading.Lock()
+                self._name_locks[name] = lock
+            return lock
+
     def _ensure_local(self, name: str) -> str:
         # Fail fast with a clear error before spending a process on a bad name.
         agents.resolve_active(self._config, name)
 
-        with self._lock:
-            existing = self._local.get(name)
-            if existing is not None:
-                process, base_url = existing
-                if process.poll() is None:
-                    return base_url
-                self._local.pop(name, None)
+        # Serialize per peer name: parallel delegations to the same profile must
+        # start exactly one server, and later arrivals must wait for it to be
+        # ready rather than racing ahead to a URL that is not listening yet.
+        with self._name_lock(name):
+            with self._lock:
+                existing = self._local.get(name)
+                if existing is not None:
+                    process, base_url = existing
+                    if process.poll() is None:
+                        return base_url
+                    self._local.pop(name, None)
 
             port = _free_port()
             base_url = f"http://127.0.0.1:{port}/"
@@ -122,10 +135,11 @@ class PeerPool:
                 cwd=str(self._config.workspace),
                 env=self._child_env(),
             )
-            self._local[name] = (process, base_url)
+            with self._lock:
+                self._local[name] = (process, base_url)
 
-        self._wait_ready(name, process, base_url)
-        return base_url
+            self._wait_ready(name, process, base_url)
+            return base_url
 
     def _child_env(self) -> dict[str, str]:
         """Environment for a spawned server.

@@ -10,7 +10,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
 from little_agent.a2a.models import (
@@ -129,12 +129,20 @@ class A2AClient:
         depth: int | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         poll_interval: float = POLL_INTERVAL,
+        should_stop: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Send a message and poll until the task reaches a terminal state.
 
         A peer may answer ``message/send`` with a Message instead of a Task (the
         spec allows it for immediate replies); that is returned as-is.
+
+        ``should_stop`` is polled between attempts so a caller (the emergency-stop
+        hotkey, or a cancelled parent task) can abandon the wait; the peer's task
+        is cancelled rather than left running.
         """
+
+        if should_stop is not None and should_stop():
+            raise A2AClientError("Stopped before the task was sent.")
 
         result = self.send_message(text, depth=depth)
         if result.get("kind") == "message":
@@ -147,15 +155,21 @@ class A2AClient:
         deadline = time.monotonic() + timeout
         task = result
         while str((task.get("status") or {}).get("state")) not in TERMINAL_STATES:
+            if should_stop is not None and should_stop():
+                self._cancel_quietly(task_id)
+                raise A2AClientError(f"Stopped by the caller; peer task {task_id} canceled.")
             if time.monotonic() >= deadline:
                 # Be a good citizen: ask the peer to stop the work we abandoned.
-                try:
-                    self.cancel_task(task_id)
-                except A2AClientError:
-                    pass
+                self._cancel_quietly(task_id)
                 raise A2AClientError(
                     f"Task {task_id} did not finish within {timeout:.0f}s (canceled)."
                 )
             time.sleep(poll_interval)
             task = self.get_task(task_id)
         return task
+
+    def _cancel_quietly(self, task_id: str) -> None:
+        try:
+            self.cancel_task(task_id)
+        except A2AClientError:
+            pass

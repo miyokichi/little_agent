@@ -55,9 +55,12 @@ def build_agent(
     )
 
     if depth < config.max_delegation_depth:
-        # Imported lazily: the delegation tool pulls in the A2A client stack,
+        # Imported lazily: the delegation tools pull in the A2A client stack,
         # which in turn may spawn servers that import this module.
-        from little_agent.tools.delegation import DelegateTaskTool
+        from little_agent.tools.delegation import DelegateTasksTool, DelegateTaskTool
 
-        agent.tools.register(DelegateTaskTool(config=config, depth=depth))
+        # ``stop`` is passed so a long delegation is abandoned (and the peer's
+        # task cancelled) when the emergency-stop hotkey fires.
+        agent.tools.register(DelegateTaskTool(config=config, depth=depth, stop=stop))
+        agent.tools.register(DelegateTasksTool(config=config, depth=depth, stop=stop))
     return agent

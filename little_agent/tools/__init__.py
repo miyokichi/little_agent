@@ -1,5 +1,5 @@
 from little_agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
-from little_agent.tools.delegation import DelegateTaskTool
+from little_agent.tools.delegation import DelegateTasksTool, DelegateTaskTool
 from little_agent.tools.filesystem import (
     AppendFileTool,
     DeleteFileTool,
@@ -42,6 +42,7 @@ def default_tools(enabled: set[str] | None = None) -> ToolRegistry:
 __all__ = [
     "AppendFileTool",
     "DelegateTaskTool",
+    "DelegateTasksTool",
     "DeleteFileTool",
     "FetchUrlTool",
     "MoveFileTool",

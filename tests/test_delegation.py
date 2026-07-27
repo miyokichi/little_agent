@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -23,7 +26,7 @@ from little_agent.config import AgentConfig
 from little_agent.factory import build_agent
 from little_agent.control import StopController
 from little_agent.tools.base import ToolContext
-from little_agent.tools.delegation import DelegateTaskTool
+from little_agent.tools.delegation import DelegateTasksTool, DelegateTaskTool
 
 LIBRARY = Path("skills").resolve()
 
@@ -322,6 +325,152 @@ class DelegateToolTests(unittest.TestCase):
             self.assertIn("peer exploded", result.content)
 
 
+class SlowAgent:
+    """Sleeps for a fixed time so concurrency is observable in wall-clock terms."""
+
+    def __init__(self, delay: float, reply: str = "ok") -> None:
+        self.delay = delay
+        self.reply = reply
+        self.concurrent = 0
+        self.peak = 0
+        self.prompts: list[str] = []
+        self._lock = threading.Lock()
+
+    def run(self, user_text: str) -> str:
+        with self._lock:
+            self.prompts.append(user_text)
+            self.concurrent += 1
+            self.peak = max(self.peak, self.concurrent)
+        try:
+            time.sleep(self.delay)
+            return f"{self.reply}:{user_text}"
+        finally:
+            with self._lock:
+                self.concurrent -= 1
+
+
+class ParallelDelegationTests(unittest.TestCase):
+    def _tool(self, root: Path, max_parallel: int = 4, stop=None) -> DelegateTasksTool:
+        config = _config(root, root / "agents")
+        config = replace(config, max_parallel_delegations=max_parallel)
+        return DelegateTasksTool(config=config, pool=PeerPool(config), stop=stop)
+
+    def test_subtasks_run_concurrently(self) -> None:
+        agent = SlowAgent(delay=0.6)
+        with TemporaryDirectory() as tmp, ServedAgent(agent, grace=0.0) as served:
+            tool = self._tool(Path(tmp))
+            started = time.monotonic()
+            result = tool.run(
+                ToolContext(Path(tmp)),
+                tasks=[
+                    {"task": "alpha", "agent_url": served.base_url},
+                    {"task": "bravo", "agent_url": served.base_url},
+                    {"task": "charlie", "agent_url": served.base_url},
+                ],
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertTrue(result.ok, result.content)
+            # Three 0.6s tasks would take ~1.8s sequentially; in parallel they overlap.
+            self.assertLess(elapsed, 1.5, f"took {elapsed:.2f}s — subtasks did not overlap")
+            self.assertGreater(agent.peak, 1, "no two subtasks were ever in flight together")
+            for name in ("alpha", "bravo", "charlie"):
+                self.assertIn(name, result.content)
+
+    def test_results_keep_request_order(self) -> None:
+        # Later subtasks finish first, but output order must match the request.
+        agent = SlowAgent(delay=0.0)
+        with TemporaryDirectory() as tmp, ServedAgent(agent, grace=0.0) as served:
+            tool = self._tool(Path(tmp))
+            result = tool.run(
+                ToolContext(Path(tmp)),
+                tasks=[
+                    {"task": "first", "agent_url": served.base_url},
+                    {"task": "second", "agent_url": served.base_url},
+                ],
+            )
+            self.assertLess(result.content.index("first"), result.content.index("second"))
+            self.assertIn("[1/2]", result.content)
+            self.assertIn("[2/2]", result.content)
+
+    def test_concurrency_is_capped(self) -> None:
+        agent = SlowAgent(delay=0.4)
+        with TemporaryDirectory() as tmp, ServedAgent(agent, grace=0.0) as served:
+            tool = self._tool(Path(tmp), max_parallel=2)
+            tool.run(
+                ToolContext(Path(tmp)),
+                tasks=[{"task": f"t{i}", "agent_url": served.base_url} for i in range(5)],
+            )
+            self.assertLessEqual(agent.peak, 2, f"peak concurrency was {agent.peak}, cap was 2")
+
+    def test_partial_failure_keeps_good_results(self) -> None:
+        agent = SlowAgent(delay=0.0)
+        with TemporaryDirectory() as tmp, ServedAgent(agent, grace=0.0) as served:
+            tool = self._tool(Path(tmp))
+            result = tool.run(
+                ToolContext(Path(tmp)),
+                tasks=[
+                    {"task": "good", "agent_url": served.base_url},
+                    {"task": "bad", "agent_url": "http://127.0.0.1:9/"},
+                ],
+            )
+            # One peer is unreachable, but the successful result must survive.
+            self.assertTrue(result.ok, result.content)
+            self.assertIn("1 completed, 1 failed", result.content)
+            self.assertIn("good", result.content)
+            self.assertIn("FAILED", result.content)
+
+    def test_all_failed_is_an_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tool = self._tool(Path(tmp))
+            result = tool.run(
+                ToolContext(Path(tmp)),
+                tasks=[
+                    {"task": "a", "agent_url": "http://127.0.0.1:9/"},
+                    {"task": "b", "agent_url": "http://127.0.0.1:9/"},
+                ],
+            )
+            self.assertFalse(result.ok)
+            self.assertIn("0 completed, 2 failed", result.content)
+
+    def test_empty_and_malformed_input_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tool = self._tool(Path(tmp))
+            self.assertFalse(tool.run(ToolContext(Path(tmp)), tasks=[]).ok)
+            self.assertFalse(tool.run(ToolContext(Path(tmp)), tasks=["not an object"]).ok)
+
+    def test_depth_limit_blocks_parallel_delegation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, root / "agents", max_depth=2)
+            tool = DelegateTasksTool(config=config, depth=2, pool=PeerPool(config))
+            result = tool.run(ToolContext(root), tasks=[{"task": "x"}])
+            self.assertFalse(result.ok)
+            self.assertIn("depth limit", result.content)
+
+    def test_stop_abandons_delegation_and_cancels_peer(self) -> None:
+        stop = StopController("<ctrl>+<alt>+q")
+        agent = SlowAgent(delay=3.0)
+        with TemporaryDirectory() as tmp, ServedAgent(agent, grace=0.0) as served:
+            tool = self._tool(Path(tmp), stop=stop)
+
+            # Trip the emergency stop shortly after the delegation starts.
+            threading.Timer(0.4, stop._on_activate).start()
+            started = time.monotonic()
+            result = tool.run(
+                ToolContext(Path(tmp)),
+                tasks=[{"task": "long", "agent_url": served.base_url}],
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertFalse(result.ok)
+            self.assertIn("Stopped", result.content)
+            # Returned well before the peer's 3s task would have finished.
+            self.assertLess(elapsed, 2.5, f"took {elapsed:.2f}s — stop was not honored")
+            # The abandoned peer task was cancelled rather than left running.
+            self.assertTrue(agent.stop.triggered)
+
+
 class PeerRegistryTests(unittest.TestCase):
     def test_parse_named_and_bare_urls(self) -> None:
         peers = parse_peers("office=http://127.0.0.1:8801/, http://example.com:9000/")
@@ -369,6 +518,28 @@ class LocalSpawnTests(unittest.TestCase):
                 self.assertIn("datetime", [s["id"] for s in client.card["skills"]])
                 # A second connect reuses the already-running server.
                 self.assertEqual(pool.connect(name="helper").endpoint, client.endpoint)
+            finally:
+                pool.shutdown()
+
+    def test_parallel_connects_start_exactly_one_server(self) -> None:
+        """Concurrent delegations to one local profile must not race the spawn.
+
+        Without per-name serialization a second caller could pick up the URL of a
+        server that has not started listening yet, or start a duplicate.
+        """
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents_dir = root / "agents"
+            agents.create_agent(agents_dir, LIBRARY, "helper", skills=["datetime"])
+            pool = PeerPool(_config(root, agents_dir))
+            try:
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    clients = list(
+                        executor.map(lambda _: pool.connect(name="helper"), range(4))
+                    )
+                endpoints = {client.endpoint for client in clients}
+                self.assertEqual(len(endpoints), 1, f"spawned more than one server: {endpoints}")
             finally:
                 pool.shutdown()
 

@@ -39,6 +39,8 @@ class AgentConfig:
     enable_auto_learning: bool = True
     # How deep delegate_task may nest sub-agents (0 disables delegation entirely).
     max_delegation_depth: int = 2
+    # How many subtasks delegate_tasks runs concurrently.
+    max_parallel_delegations: int = 4
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -83,4 +85,7 @@ class AgentConfig:
             global_profile_path=global_profile_path,
             enable_auto_learning=_as_bool(os.getenv("LITTLE_AGENT_AUTO_LEARNING"), True),
             max_delegation_depth=int(os.getenv("LITTLE_AGENT_MAX_DELEGATION_DEPTH", "2")),
+            max_parallel_delegations=max(
+                1, int(os.getenv("LITTLE_AGENT_MAX_PARALLEL_DELEGATIONS", "4"))
+            ),
         )
