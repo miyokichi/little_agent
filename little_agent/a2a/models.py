@@ -7,6 +7,8 @@ implements is modelled: Agent Card, Message, Part, Task, TaskStatus, Artifact.
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -74,6 +76,10 @@ def text_part(text: str) -> dict[str, Any]:
     return {"kind": "text", "text": text}
 
 
+def data_part(data: Any) -> dict[str, Any]:
+    return {"kind": "data", "data": data}
+
+
 def parts_to_text(parts: Any) -> str:
     """Concatenate the text parts of a Message/Artifact, ignoring other kinds."""
 
@@ -86,18 +92,94 @@ def parts_to_text(parts: Any) -> str:
     return "\n".join(chunk for chunk in chunks if chunk)
 
 
+def parts_to_data(parts: Any) -> list[Any]:
+    """The payloads of every DataPart in a Message/Artifact, in order."""
+
+    if not isinstance(parts, list):
+        return []
+    return [
+        part.get("data")
+        for part in parts
+        if isinstance(part, dict) and part.get("kind") == "data" and "data" in part
+    ]
+
+
+# Keys a DataPart may use to address the runtime directly. Any other DataPart
+# content is treated as context for the task.
+INSTRUCTION_KEY = "instruction"
+CONTEXT_KEY = "context"
+OUTPUT_SCHEMA_KEY = "output_schema"
+REQUEST_KEYS = frozenset({INSTRUCTION_KEY, CONTEXT_KEY, OUTPUT_SCHEMA_KEY})
+
+
+@dataclass(slots=True)
+class RequestPayload:
+    """What an incoming A2A Message asks the agent to do.
+
+    Text parts carry the instruction; DataParts carry structured input. A
+    DataPart may name the request fields explicitly::
+
+        {"instruction": "...", "context": {...}, "output_schema": {...}}
+
+    and any DataPart without those keys is merged into ``context`` as-is, so a
+    caller can simply send its payload.
+    """
+
+    instruction: str = ""
+    context: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] | None = None
+
+
+def parse_request_parts(parts: Any) -> RequestPayload:
+    """Read an incoming Message's parts into a RequestPayload."""
+
+    payload = RequestPayload()
+    text = parts_to_text(parts).strip()
+    instructions = [text] if text else []
+
+    for data in parts_to_data(parts):
+        if not isinstance(data, dict):
+            # A bare list/scalar DataPart is still input; keep it addressable.
+            bare = payload.context.get("data")
+            payload.context["data"] = [*bare, data] if isinstance(bare, list) else [data]
+            continue
+        if not REQUEST_KEYS & data.keys():
+            payload.context.update(data)
+            continue
+        instruction = data.get(INSTRUCTION_KEY)
+        if isinstance(instruction, str) and instruction.strip():
+            instructions.append(instruction.strip())
+        context = data.get(CONTEXT_KEY)
+        if isinstance(context, dict):
+            payload.context.update(context)
+        elif context is not None:
+            payload.context[CONTEXT_KEY] = context
+        schema = data.get(OUTPUT_SCHEMA_KEY)
+        if isinstance(schema, dict):
+            payload.output_schema = schema
+
+    payload.instruction = "\n\n".join(instructions)
+    return payload
+
+
 def new_message(
     role: str,
-    text: str,
+    text: str = "",
     *,
+    data: Any = None,
     task_id: str | None = None,
     context_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append(text_part(text))
+    if data is not None:
+        parts.append(data_part(data))
     message: dict[str, Any] = {
         "kind": "message",
         "role": role,
-        "parts": [text_part(text)],
+        "parts": parts,
         "messageId": new_id(),
     }
     if task_id:
@@ -128,8 +210,28 @@ def text_artifact(text: str, name: str = "result") -> dict[str, Any]:
     }
 
 
+def result_artifact(text: str, data: Any = None, name: str = "result") -> dict[str, Any]:
+    """The finished task's deliverable: a DataPart when structured, else text."""
+
+    if data is None:
+        return text_artifact(text, name)
+    return {"artifactId": new_id(), "name": name, "parts": [data_part(data)]}
+
+
+def _parts_output(parts: Any) -> str:
+    """Readable text for a set of parts, rendering DataParts as JSON."""
+
+    chunks: list[str] = []
+    text = parts_to_text(parts)
+    if text:
+        chunks.append(text)
+    for data in parts_to_data(parts):
+        chunks.append(json.dumps(data, ensure_ascii=False))
+    return "\n\n".join(chunks)
+
+
 def task_result_text(task: dict[str, Any]) -> str:
-    """Best-effort extraction of a finished task's output.
+    """Best-effort extraction of a finished task's output as text.
 
     Prefers artifacts (where an agent puts its deliverable) and falls back to the
     final status message, which is where a failure reason usually lands.
@@ -138,7 +240,7 @@ def task_result_text(task: dict[str, Any]) -> str:
     chunks: list[str] = []
     for artifact in task.get("artifacts") or []:
         if isinstance(artifact, dict):
-            chunk = parts_to_text(artifact.get("parts"))
+            chunk = _parts_output(artifact.get("parts"))
             if chunk:
                 chunks.append(chunk)
     if chunks:
@@ -147,8 +249,18 @@ def task_result_text(task: dict[str, Any]) -> str:
     if isinstance(status, dict):
         message = status.get("message")
         if isinstance(message, dict):
-            return parts_to_text(message.get("parts"))
+            return _parts_output(message.get("parts"))
     return ""
+
+
+def task_result_data(task: dict[str, Any]) -> Any | None:
+    """The first DataPart payload in a finished task's artifacts, if any."""
+
+    for artifact in task.get("artifacts") or []:
+        if isinstance(artifact, dict):
+            for data in parts_to_data(artifact.get("parts")):
+                return data
+    return None
 
 
 def agent_card(
@@ -175,8 +287,10 @@ def agent_card(
             "pushNotifications": False,
             "stateTransitionHistory": False,
         },
-        "defaultInputModes": ["text/plain"],
-        "defaultOutputModes": ["text/plain"],
+        # Both plain text and structured JSON (A2A TextPart / DataPart) are accepted
+        # as input and can be returned as the result.
+        "defaultInputModes": ["text/plain", "application/json"],
+        "defaultOutputModes": ["text/plain", "application/json"],
         "skills": skills,
     }
     if requires_auth:

@@ -3,9 +3,9 @@
     python -m little_agent.a2a.serve --agent office --port 8801
     little-agent --serve-a2a --agent office --port 8801
 
-The served agent builds a fresh conversation per A2A task, so peers never share
-context. Tools that need confirmation are refused unless auto-approval is
-enabled, because a served agent has no human at a prompt.
+Each A2A task gets a freshly built agent and a run that keeps nothing, so tasks
+never share context. Tools that need confirmation are refused unless
+auto-approval is enabled, because a served agent has no human at a prompt.
 """
 
 from __future__ import annotations
@@ -29,7 +29,10 @@ def _card_skills(profile: AgentProfile) -> list[dict[str, Any]]:
     """Advertise the profile's Little Agent skills as A2A skills."""
 
     skills = []
-    for skill in SkillLoader(profile.skills_dir.resolve()).load_all():
+    loader = SkillLoader(
+        [root.resolve() for root in profile.skill_roots()], names=profile.skill_names()
+    )
+    for skill in loader.load_all():
         skills.append(
             agent_skill(
                 skill_id=skill.name,

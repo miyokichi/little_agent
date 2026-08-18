@@ -103,9 +103,13 @@ class A2AClient:
             raise A2AClientError("Peer returned neither result nor error.")
         return response["result"]
 
-    def send_message(self, text: str, depth: int | None = None) -> dict[str, Any]:
+    def send_message(
+        self, text: str = "", depth: int | None = None, data: Any = None
+    ) -> dict[str, Any]:
+        """Send one message. ``data`` is sent as an A2A DataPart alongside the text."""
+
         metadata = {DEPTH_METADATA_KEY: depth} if depth is not None else None
-        message = new_message("user", text, metadata=metadata)
+        message = new_message("user", text, data=data, metadata=metadata)
         result = self.call("message/send", {"message": message})
         if not isinstance(result, dict):
             raise A2AClientError("message/send did not return a Task or Message.")
@@ -125,13 +129,17 @@ class A2AClient:
 
     def run_task(
         self,
-        text: str,
+        text: str = "",
         depth: int | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         poll_interval: float = POLL_INTERVAL,
         should_stop: Callable[[], bool] | None = None,
+        data: Any = None,
     ) -> dict[str, Any]:
         """Send a message and poll until the task reaches a terminal state.
+
+        ``data`` is sent as a DataPart, which is how structured input (and an
+        ``output_schema`` asking for a structured result) reaches the peer.
 
         A peer may answer ``message/send`` with a Message instead of a Task (the
         spec allows it for immediate replies); that is returned as-is.
@@ -144,7 +152,7 @@ class A2AClient:
         if should_stop is not None and should_stop():
             raise A2AClientError("Stopped before the task was sent.")
 
-        result = self.send_message(text, depth=depth)
+        result = self.send_message(text, depth=depth, data=data)
         if result.get("kind") == "message":
             return result
 

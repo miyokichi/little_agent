@@ -142,8 +142,6 @@ class LocalRuleClient(LLMClient):
         lowered = text.lower()
         if "time" in lowered or "date" in lowered:
             return {"content": "", "tool_calls": [{"name": "get_datetime", "arguments": {}}], "usage": {}}
-        if "task" in lowered or "todo" in lowered:
-            return {"content": "", "tool_calls": [{"name": "list_tasks", "arguments": {"status": "open"}}], "usage": {}}
         if "list" in lowered or "ls" in lowered:
             return {"content": "", "tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}], "usage": {}}
         return {

@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from little_agent import agents
-from little_agent.agent import Agent
+from little_agent.agent import Agent, StructuredOutputError
 from little_agent.commands import CommandContext, CommandRegistry
 from little_agent.config import AgentConfig
 from little_agent.control import StopController
@@ -24,6 +24,15 @@ def _make_confirm(stop_hotkey: str):
         return answer in {"y", "yes"}
 
     return _confirm
+
+
+def _run(agent: Agent, text: str) -> str:
+    """Run one execution and render its result for the terminal."""
+
+    try:
+        return agent.run(text).text
+    except StructuredOutputError as exc:
+        return f"Structured output error: {exc}"
 
 
 def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> agents.AgentProfile:
@@ -54,9 +63,11 @@ def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> age
     if not choice or choice == "0":
         return agents.default_profile(config)
     if choice.isdigit() and 1 <= int(choice) <= len(available):
-        return agents.load_profile(config.agents_dir, available[int(choice) - 1])
+        return agents.load_profile(
+            config.agents_dir, available[int(choice) - 1], config.skill_library_dir
+        )
     if choice in available:
-        return agents.load_profile(config.agents_dir, choice)
+        return agents.load_profile(config.agents_dir, choice, config.skill_library_dir)
     print(f"Unknown selection '{choice}', using '{agents.DEFAULT_AGENT_NAME}'.")
     return agents.default_profile(config)
 
@@ -116,7 +127,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Workspace: {config.workspace}")
     print(f"Active agent: {ctx.active_agent}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
-    print("Type /help for commands, /exit to quit. /remember saves what was learned so far.\n")
+    print("Each message is one independent run; nothing carries over between them.")
+    print("Type /help for commands, /exit to quit.\n")
 
     while True:
         try:
@@ -129,26 +141,21 @@ def main(argv: list[str] | None = None) -> None:
 
         result = registry.dispatch(ctx, user_text)
         if result is None:
-            print(ctx.agent.run(user_text))
+            print(_run(ctx.agent, user_text))
             print()
             continue
         if result.output is not None:
             print(result.output)
         if result.agent_prompt is not None:
-            print(ctx.agent.run(result.agent_prompt))
+            print(_run(ctx.agent, result.agent_prompt))
         if result.should_exit:
             break
         print()
 
-    _end_session(ctx.agent)
+    _shutdown()
 
 
-def _end_session(agent: Agent) -> None:
-    try:
-        if agent.end_session():
-            print("[memory] learned from this session.")
-    except Exception as exc:  # noqa: BLE001 - never let auto-learning break exit.
-        print(f"[memory] auto-learning skipped: {exc}")
+def _shutdown() -> None:
     try:
         from little_agent.a2a.peers import shutdown_shared
 

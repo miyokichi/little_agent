@@ -26,11 +26,12 @@ def build_agent(
 
     Profile overrides (model / max_tool_steps / require_confirmation) are layered
     onto the base config; ``core_tools`` filters the built-in core tools; and the
-    skill loader is pointed at the profile's skills directory.
+    skill loader is pointed at the skills the profile declares.
 
     ``depth`` is the A2A delegation depth of this agent. While it is below
-    ``config.max_delegation_depth`` the agent gets a ``delegate_task`` tool so it
-    can hand subtasks to peer agents over A2A; at the limit the tool is omitted.
+    ``config.max_delegation_depth`` — and the profile allows the tools — the agent
+    gets ``delegate_task``/``delegate_tasks`` so it can hand subtasks to peer
+    agents over A2A; at the limit they are omitted.
     """
 
     effective = replace(
@@ -45,7 +46,9 @@ def build_agent(
             else config.require_confirmation
         ),
     )
-    skills = SkillLoader(profile.skills_dir.resolve())
+    skills = SkillLoader(
+        [root.resolve() for root in profile.skill_roots()], names=profile.skill_names()
+    )
     agent = Agent(
         config=effective,
         skills=skills,
@@ -61,6 +64,10 @@ def build_agent(
 
         # ``stop`` is passed so a long delegation is abandoned (and the peer's
         # task cancelled) when the emergency-stop hotkey fires.
-        agent.tools.register(DelegateTaskTool(config=config, depth=depth, stop=stop))
-        agent.tools.register(DelegateTasksTool(config=config, depth=depth, stop=stop))
+        for tool in (
+            DelegateTaskTool(config=config, depth=depth, stop=stop),
+            DelegateTasksTool(config=config, depth=depth, stop=stop),
+        ):
+            if profile.tool_allowed(tool.name):
+                agent.tools.register(tool)
     return agent

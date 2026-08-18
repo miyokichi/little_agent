@@ -2,8 +2,8 @@
 
 Two kinds of commands are supported:
 
-* **Built-in commands** run inside the CLI and never call the LLM. They control
-  the session or report state (``/help``, ``/clear``, ``/skills`` ...).
+* **Built-in commands** run inside the CLI and never call the LLM. They report
+  state or switch agent (``/help``, ``/skills``, ``/agent`` ...).
 * **Custom commands** are markdown files under a project ``commands/`` directory
   (and an optional global ``~/.little_agent/commands/``). Each file is a prompt
   template that is expanded with the caller's arguments and sent to
@@ -246,12 +246,6 @@ def _cmd_exit(ctx: CommandContext, args: str) -> DispatchResult:
     return DispatchResult(should_exit=True)
 
 
-def _cmd_clear(ctx: CommandContext, args: str) -> DispatchResult:
-    count = len(ctx.agent.memory.messages)
-    ctx.agent.memory.messages.clear()
-    return DispatchResult(output=f"Conversation memory cleared ({count} message(s) dropped).")
-
-
 def _first_line(text: str, limit: int = 80) -> str:
     line = text.strip().splitlines()[0].strip() if text.strip() else ""
     return line if len(line) <= limit else line[: limit - 1] + "…"
@@ -282,19 +276,6 @@ def _cmd_tools(ctx: CommandContext, args: str) -> DispatchResult:
         tool = ctx.agent.tools.get(name)
         flag = " (confirm)" if getattr(tool, "requires_confirmation", False) else ""
         lines.append(f"  {name:<22} {_first_line(tool.description)}{flag}")
-    return DispatchResult(output="\n".join(lines))
-
-
-def _cmd_memory(ctx: CommandContext, args: str) -> DispatchResult:
-    global_mem = ctx.agent.global_memory.load()
-    workspace_mem = ctx.agent.workspace_memory.load()
-    lines = [
-        f"Global memory  ({ctx.agent.global_memory.path}):",
-        global_mem or "  (empty)",
-        "",
-        f"Workspace memory ({ctx.agent.workspace_memory.path}):",
-        workspace_mem or "  (empty)",
-    ]
     return DispatchResult(output="\n".join(lines))
 
 
@@ -344,7 +325,9 @@ def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:
     profiles = [agent_profiles.default_profile(config)]
     for name in agent_profiles.list_agents(config.agents_dir):
         try:
-            profiles.append(agent_profiles.load_profile(config.agents_dir, name))
+            profiles.append(
+                agent_profiles.load_profile(config.agents_dir, name, config.skill_library_dir)
+            )
         except (OSError, ValueError):
             continue
     lines = [f"Agents ({len(profiles)}):"]
@@ -356,16 +339,6 @@ def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:
     lines.append("")
     lines.append("Active is marked with *. Switch with /agent <name> (/agent default for the library).")
     return DispatchResult(output="\n".join(lines))
-
-
-def _cmd_remember(ctx: CommandContext, args: str) -> DispatchResult:
-    try:
-        learned = ctx.agent.remember()
-    except Exception as exc:  # noqa: BLE001 - never let auto-learning break the prompt.
-        return DispatchResult(output=f"[memory] auto-learning skipped: {exc}")
-    return DispatchResult(
-        output="[memory] learned from this session." if learned else "[memory] nothing new to learn."
-    )
 
 
 def _cmd_agent(ctx: CommandContext, args: str) -> DispatchResult:
@@ -391,14 +364,11 @@ def _builtin_commands() -> list[BuiltinCommand]:
     return [
         BuiltinCommand("help", "List available commands.", _cmd_help, aliases=("?",)),
         BuiltinCommand("exit", "Quit the session.", _cmd_exit, aliases=("quit",)),
-        BuiltinCommand("clear", "Clear the conversation memory (fresh context).", _cmd_clear),
         BuiltinCommand("skills", "List loaded skills (/skills <name> for detail).", _cmd_skills),
         BuiltinCommand("tools", "List registered tools.", _cmd_tools),
-        BuiltinCommand("memory", "Show workspace and global memory.", _cmd_memory),
         BuiltinCommand("usage", "Show this session's token usage.", _cmd_usage),
         BuiltinCommand("config", "Show the current configuration.", _cmd_config),
         BuiltinCommand("reload", "Reload custom commands from disk.", _cmd_reload),
         BuiltinCommand("agents", "List agent profiles.", _cmd_agents),
         BuiltinCommand("agent", "Show or switch the active agent (/agent <name>).", _cmd_agent),
-        BuiltinCommand("remember", "Distill and save durable memory from this session.", _cmd_remember),
     ]

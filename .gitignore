@@ -6,16 +6,9 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-data/tasks.json*
-data/workflows.json*
-data/projects.json*
 .test-*.json
 .test-*/
 logs/
 agents/
-
-# Runtime memory/profile artifacts (workspace-level)
-memory.md
-profile.md
 
 *.png

@@ -1,23 +1,24 @@
+"""Agent profiles: the capability contract that bounds what an agent may do."""
+
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
+import shutil
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from little_agent import agents
-from little_agent.agent import Agent
 from little_agent.config import AgentConfig
-from little_agent.skills.loader import SkillLoader
+from little_agent.control import StopController
+from little_agent.factory import build_agent
 from little_agent.tools import default_tools
 
 LIBRARY = Path("skills").resolve()
 
 
-def _config(workspace: Path, agents_dir: Path) -> AgentConfig:
-    return AgentConfig(
+def _config(workspace: Path, agents_dir: Path, **overrides) -> AgentConfig:
+    base = dict(
         model="local",
         workspace=workspace.resolve(),
         require_confirmation=False,
@@ -27,6 +28,19 @@ def _config(workspace: Path, agents_dir: Path) -> AgentConfig:
         skill_library_dir=LIBRARY,
         agents_dir=agents_dir.resolve(),
     )
+    base.update(overrides)
+    return AgentConfig(**base)  # type: ignore[arg-type]
+
+
+def write_profile(agents_dir: Path, name: str, **profile) -> Path:
+    """Create an agents/<name>/agent.json, the way an operator would."""
+
+    directory = agents_dir / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "agent.json").write_text(
+        json.dumps({"name": name, **profile}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return directory
 
 
 class DefaultToolsFilterTests(unittest.TestCase):
@@ -38,57 +52,73 @@ class DefaultToolsFilterTests(unittest.TestCase):
         self.assertEqual(set(registry.names()), {"read_file", "list_dir"})
 
 
-class ProfileFilesystemTests(unittest.TestCase):
-    def test_create_agent_copies_only_requested_skills_and_leaves_library(self) -> None:
+class ProfileLoadingTests(unittest.TestCase):
+    def test_profile_round_trips_from_disk(self) -> None:
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
-            profile = agents.create_agent(
-                agents_dir, LIBRARY, "Office Bot", description="office", skills=["project_manager"]
+            write_profile(
+                agents_dir,
+                "reader",
+                description="reads things",
+                model="gpt-test",
+                skills=["datetime"],
+                core_tools=["read_file"],
+                max_tool_steps=2,
+                require_confirmation=True,
             )
 
-            self.assertEqual(profile.name, "office-bot")
-            self.assertTrue((profile.skills_dir / "project_manager" / "SKILL.md").exists())
-            self.assertFalse((profile.skills_dir / "datetime").exists())
-            self.assertEqual(profile.enabled_skills(), ["project_manager"])
-            # Library is untouched.
-            self.assertTrue((LIBRARY / "project_manager").exists())
-            self.assertTrue((LIBRARY / "file_manager").exists())
+            profile = agents.load_profile(agents_dir, "reader", LIBRARY)
 
-    def test_load_profile_round_trips(self) -> None:
+            self.assertEqual(profile.description, "reads things")
+            self.assertEqual(profile.model, "gpt-test")
+            self.assertEqual(profile.core_tools_set(), {"read_file"})
+            self.assertEqual(profile.max_tool_steps, 2)
+            self.assertTrue(profile.require_confirmation)
+            self.assertEqual(profile.enabled_skills(), ["datetime"])
+
+    def test_declared_skills_come_from_the_library(self) -> None:
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
-            agents.create_agent(
-                agents_dir, LIBRARY, "reader", description="d", core_tools=["read_file"]
-            )
-            loaded = agents.load_profile(agents_dir, "reader")
-            self.assertEqual(loaded.description, "d")
-            self.assertEqual(loaded.core_tools, ["read_file"])
-            self.assertEqual(loaded.core_tools_set(), {"read_file"})
+            write_profile(agents_dir, "observer", skills=["datetime", "excel_file"])
 
-    def test_add_remove_and_delete(self) -> None:
+            profile = agents.load_profile(agents_dir, "observer", LIBRARY)
+
+            self.assertEqual(profile.enabled_skills(), ["datetime", "excel_file"])
+            self.assertIn(LIBRARY, profile.skill_roots())
+
+    def test_own_skill_folder_is_used_and_shadows_the_library(self) -> None:
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
-            agents.create_agent(agents_dir, LIBRARY, "a", skills=["project_manager"])
-            agents.add_skill(agents_dir, LIBRARY, "a", "datetime")
-            self.assertEqual(set(agents.load_profile(agents_dir, "a").enabled_skills()), {"project_manager", "datetime"})
+            directory = write_profile(agents_dir, "solo")
+            shutil.copytree(LIBRARY / "datetime", directory / "skills" / "datetime")
 
-            agents.remove_skill(agents_dir, "a", "datetime")
-            self.assertEqual(agents.load_profile(agents_dir, "a").enabled_skills(), ["project_manager"])
+            profile = agents.load_profile(agents_dir, "solo", LIBRARY)
 
-            agents.delete_agent(agents_dir, "a")
-            self.assertFalse(agents.profile_exists(agents_dir, "a"))
+            # No "skills" declaration: only the profile's own folder is searched.
+            self.assertEqual(profile.enabled_skills(), ["datetime"])
+            self.assertEqual(profile.skill_roots(), [directory / "skills"])
 
-    def test_create_rejects_unknown_library_skill(self) -> None:
+    def test_missing_agent_raises(self) -> None:
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                agents.load_profile(Path(tmp) / "agents", "nope", LIBRARY)
+
+    def test_agent_name_cannot_escape_the_agents_directory(self) -> None:
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
-            with self.assertRaisesRegex(ValueError, "Skill not found in library"):
-                agents.create_agent(agents_dir, LIBRARY, "bad", skills=["does_not_exist"])
 
-    def test_skill_name_traversal_rejected(self) -> None:
+            resolved = agents.agent_dir(agents_dir, "../secret")
+
+            self.assertEqual(resolved, (agents_dir / "secret").resolve())
+
+    def test_list_agents(self) -> None:
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
-            with self.assertRaises(ValueError):
-                agents.create_agent(agents_dir, LIBRARY, "x", skills=["../secret"])
+            write_profile(agents_dir, "a")
+            write_profile(agents_dir, "b")
+            (agents_dir / "not-an-agent").mkdir()
+
+            self.assertEqual(agents.list_agents(agents_dir), ["a", "b"])
 
     def test_resolve_active(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -101,107 +131,85 @@ class ProfileFilesystemTests(unittest.TestCase):
             self.assertTrue(agents.resolve_active(config, "library").builtin)
             with self.assertRaises(FileNotFoundError):
                 agents.resolve_active(config, "missing")
-            agents.create_agent(agents_dir, LIBRARY, "here", skills=["datetime"])
+            write_profile(agents_dir, "here", skills=["datetime"])
             self.assertEqual(agents.resolve_active(config, "here").name, "here")
 
-    def test_default_profile_uses_library(self) -> None:
+    def test_default_profile_uses_the_whole_library(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             default = agents.default_profile(_config(root, root / "agents"))
+
             self.assertTrue(default.builtin)
-            self.assertEqual(default.skills_dir, LIBRARY)
+            self.assertEqual(default.skill_roots(), [LIBRARY])
+            self.assertIsNone(default.skill_names())
             self.assertIn("datetime", default.enabled_skills())
             self.assertIsNone(default.core_tools_set())
 
-    def test_create_rejects_reserved_name(self) -> None:
-        with TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "reserved"):
-                agents.create_agent(Path(tmp) / "agents", LIBRARY, "default", skills=["datetime"])
 
+class ProfileCapabilityTests(unittest.TestCase):
+    """A profile decides which skills and tools an agent actually gets."""
 
-class AgentToolFilteringTests(unittest.TestCase):
-    def test_agent_applies_core_allowlist_and_keeps_skill_and_memory_tools(self) -> None:
+    def _build(self, root: Path, name: str | None, **profile):
+        agents_dir = root / "agents"
+        config = _config(root, agents_dir)
+        if name is None:
+            resolved = agents.default_profile(config)
+        else:
+            write_profile(agents_dir, name, **profile)
+            resolved = agents.load_profile(agents_dir, name, LIBRARY)
+        return build_agent(config, resolved, lambda *_: True, StopController("x"))
+
+    def test_skills_are_limited_to_the_profile(self) -> None:
         with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            agents_dir = root / "agents"
-            profile = agents.create_agent(
-                agents_dir, LIBRARY, "tooled", skills=["project_manager"], core_tools=["read_file"]
-            )
-            config = _config(root, agents_dir)
-            loader = SkillLoader(profile.skills_dir)
-            agent = Agent(config, loader, core_tools=profile.core_tools_set())
+            agent = self._build(Path(tmp), "narrow", skills=["datetime"])
+
+            self.assertEqual([skill.name for skill in agent.skills.load_all()], ["datetime"])
+            self.assertIn("get_datetime", agent.tools.names())
+            self.assertNotIn("read_excel", agent.tools.names())  # excel_file not granted
+
+    def test_core_tool_allowlist_is_applied(self) -> None:
+        with TemporaryDirectory() as tmp:
+            agent = self._build(Path(tmp), "tooled", skills=["datetime"], core_tools=["read_file"])
             names = set(agent.tools.names())
 
-            self.assertIn("read_file", names)          # allowed core tool
+            self.assertIn("read_file", names)  # allowed core tool
             self.assertNotIn("run_powershell", names)  # filtered-out core tool
-            self.assertIn("add_task", names)           # from the copied skill
-            self.assertIn("update_workspace_memory", names)  # memory tools always on
+            self.assertIn("get_datetime", names)  # skill script tools are unaffected
 
-    def test_no_agent_fallback_uses_full_library_and_all_core_tools(self) -> None:
+    def test_delegation_is_granted_by_default_and_deniable_by_profile(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            agents_dir = root / "agents"
-            config = _config(root, agents_dir)
-            # With no agent chosen, resolve_active yields the built-in default
-            # (the whole library), which build_agent turns into a full-library agent.
-            profile = agents.resolve_active(config, config.active_agent)
-            self.assertEqual(profile.name, agents.DEFAULT_AGENT_NAME)
-            self.assertTrue(profile.builtin)
-            agent = Agent(config, SkillLoader(profile.skills_dir), core_tools=profile.core_tools_set())
+            open_agent = self._build(root, "open", skills=["datetime"])
+            self.assertIn("delegate_task", open_agent.tools.names())
+            self.assertIn("delegate_tasks", open_agent.tools.names())
+
+            closed = self._build(root, "closed", skills=["datetime"], core_tools=["read_file"])
+            self.assertNotIn("delegate_task", closed.tools.names())
+            self.assertNotIn("delegate_tasks", closed.tools.names())
+
+            partial = self._build(
+                root, "partial", skills=["datetime"], core_tools=["read_file", "delegate_task"]
+            )
+            self.assertIn("delegate_task", partial.tools.names())
+            self.assertNotIn("delegate_tasks", partial.tools.names())
+
+    def test_profile_overrides_model_and_step_budget(self) -> None:
+        with TemporaryDirectory() as tmp:
+            agent = self._build(
+                Path(tmp), "slow", skills=["datetime"], model="gpt-test", max_tool_steps=9
+            )
+
+            self.assertEqual(agent.config.model, "gpt-test")
+            self.assertEqual(agent.config.max_tool_steps, 9)
+
+    def test_default_agent_gets_the_library_and_every_core_tool(self) -> None:
+        with TemporaryDirectory() as tmp:
+            agent = self._build(Path(tmp), None)
             names = set(agent.tools.names())
+
             self.assertIn("run_powershell", names)
-            self.assertIn("add_task", names)  # full library skills loaded
-
-
-class AgentManagerScriptTests(unittest.TestCase):
-    SCRIPT = Path("skills/agent_manager/scripts/agent_manager.py").resolve()
-
-    def _run(self, tool: str, workspace: Path, arguments: dict) -> dict:
-        payload = {"tool": tool, "workspace": str(workspace), "arguments": arguments}
-        completed = subprocess.run(
-            [sys.executable, str(self.SCRIPT), tool],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        return json.loads(completed.stdout.strip())
-
-    def _seed_library(self, workspace: Path) -> None:
-        mini = workspace / "skills" / "mini"
-        mini.mkdir(parents=True)
-        (mini / "SKILL.md").write_text(
-            "# mini\n\n## Description\nmini\n\n## When to use\n- t\n\n## Allowed tools\n- none\n\n## Instructions\n- t\n",
-            encoding="utf-8",
-        )
-
-    def test_create_list_show_delete(self) -> None:
-        with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            self._seed_library(workspace)
-
-            created = self._run("create_agent", workspace, {"name": "Office", "skills": ["mini"]})
-            self.assertTrue(created["ok"], created)
-            self.assertTrue((workspace / "agents" / "office" / "skills" / "mini" / "SKILL.md").exists())
-
-            listed = self._run("list_agents", workspace, {})
-            self.assertIn("office", listed["content"])
-
-            shown = self._run("show_agent", workspace, {"name": "office"})
-            self.assertIn("mini", shown["content"])
-
-            deleted = self._run("delete_agent", workspace, {"name": "office"})
-            self.assertTrue(deleted["ok"])
-            self.assertFalse((workspace / "agents" / "office").exists())
-
-    def test_create_rejects_unknown_skill(self) -> None:
-        with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            self._seed_library(workspace)
-            result = self._run("create_agent", workspace, {"name": "x", "skills": ["nope"]})
-            self.assertFalse(result["ok"])
-            self.assertIn("Skill not found", result["content"])
+            self.assertIn("get_datetime", names)
+            self.assertIn("delegate_task", names)
 
 
 if __name__ == "__main__":

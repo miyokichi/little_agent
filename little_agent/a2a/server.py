@@ -3,10 +3,14 @@
 Serves the Agent Card at ``/.well-known/agent-card.json`` and JSON-RPC 2.0 at
 ``/`` with ``message/send``, ``tasks/get`` and ``tasks/cancel``.
 
-Each task runs in its own worker thread with a **freshly built agent**, so a
-delegated task never shares conversation context with another. ``tasks/cancel``
-trips that task's stop controller, which aborts the agent between tool calls —
-the same mechanism as the interactive emergency-stop hotkey.
+A request carries its instruction as TextParts, DataParts, or both; a DataPart
+may also supply ``context`` for the run and an ``output_schema`` to demand a
+machine-readable result, which comes back as a DataPart artifact.
+
+Each task runs in its own worker thread with a **freshly built agent**, and an
+agent run keeps nothing after it returns, so tasks never share context.
+``tasks/cancel`` trips that task's stop controller, which aborts the agent
+between tool calls — the same mechanism as the interactive emergency-stop hotkey.
 """
 
 from __future__ import annotations
@@ -35,14 +39,15 @@ from little_agent.a2a.models import (
     TERMINAL_STATES,
     UNSUPPORTED_OPERATION,
     A2AError,
+    RequestPayload,
     new_id,
     new_message,
     new_task,
     now_iso,
-    parts_to_text,
+    parse_request_parts,
+    result_artifact,
     rpc_error,
     rpc_result,
-    text_artifact,
 )
 
 MAX_BODY_BYTES = 1024 * 1024
@@ -87,7 +92,7 @@ class TaskStore:
         task_id: str,
         state: str,
         message_text: str | None = None,
-        artifact_text: str | None = None,
+        artifact: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             task = self._tasks.get(task_id)
@@ -99,8 +104,8 @@ class TaskStore:
                     "agent", message_text, task_id=task_id, context_id=task["contextId"]
                 )
             task["status"] = status
-            if artifact_text:
-                task["artifacts"] = [text_artifact(artifact_text)]
+            if artifact is not None:
+                task["artifacts"] = [artifact]
             if state in TERMINAL_STATES:
                 event = self._done.get(task_id)
                 if event is not None:
@@ -177,11 +182,12 @@ class A2AService:
         message = params.get("message")
         if not isinstance(message, dict):
             raise A2AError(INVALID_PARAMS, "message is required.")
-        prompt = parts_to_text(message.get("parts"))
-        if not prompt.strip():
+        payload = parse_request_parts(message.get("parts"))
+        if not payload.instruction.strip():
             raise A2AError(
                 CONTENT_TYPE_NOT_SUPPORTED,
-                "This agent accepts text parts only; no text content was provided.",
+                "No instruction was provided: send a text part, or a data part with "
+                "an 'instruction' field.",
             )
 
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
@@ -201,7 +207,7 @@ class A2AService:
 
         worker = threading.Thread(
             target=self._run_task,
-            args=(task_id, prompt, depth, stop),
+            args=(task_id, payload, depth, stop),
             name=f"a2a-task-{task_id[:8]}",
             daemon=True,
         )
@@ -213,17 +219,25 @@ class A2AService:
         assert result is not None
         return result
 
-    def _run_task(self, task_id: str, prompt: str, depth: int, stop: "_CancelFlag") -> None:
+    def _run_task(
+        self, task_id: str, payload: RequestPayload, depth: int, stop: "_CancelFlag"
+    ) -> None:
         try:
             agent = self._agent_factory(depth, stop)
-            answer = agent.run(prompt)
+            result = agent.run(
+                payload.instruction,
+                context=payload.context or None,
+                output_schema=payload.output_schema,
+            )
         except Exception as exc:  # noqa: BLE001 - reported to the peer as a failed task.
             self.tasks.set_state(task_id, TASK_FAILED, f"Agent run failed: {exc}")
             return
         current = self.tasks.get(task_id) or {}
         if str((current.get("status") or {}).get("state")) == TASK_CANCELED:
             return  # cancellation already recorded; don't overwrite it
-        self.tasks.set_state(task_id, TASK_COMPLETED, artifact_text=answer)
+        self.tasks.set_state(
+            task_id, TASK_COMPLETED, artifact=result_artifact(result.text, result.data)
+        )
 
     def tasks_get(self, params: dict[str, Any]) -> dict[str, Any]:
         task_id = str(params.get("id") or "")

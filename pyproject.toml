@@ -1,7 +1,7 @@
 [project]
 name = "little-agent"
 version = "0.1.0"
-description = "A small Windows-friendly Python AI agent system with tools and skills."
+description = "A small stateless agent runtime: skills, tools, and an A2A interface."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -4,7 +4,7 @@ from unittest.mock import patch
 import unittest
 from pathlib import Path
 
-from little_agent.agent import Agent
+from little_agent.agent import Agent, StructuredOutputError
 from little_agent.config import AgentConfig
 from little_agent.llm import OpenAICompatibleChatClient
 from little_agent.messages import Message
@@ -12,10 +12,38 @@ from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry, ToolResult, resolve_workspace_path
 
+LIBRARY = Path("skills").resolve()
 
-class CoreTests(unittest.TestCase):
+
+def _config(workspace: Path | None = None, **overrides) -> AgentConfig:
+    base = dict(
+        model="local",
+        workspace=(workspace or Path.cwd()).resolve(),
+        require_confirmation=True,
+        openai_api_key=None,
+        openai_base_url="https://api.openai.com/v1",
+        enable_logging=False,
+    )
+    base.update(overrides)
+    return AgentConfig(**base)  # type: ignore[arg-type]
+
+
+class RecordingLLM:
+    """Replies from a scripted list, remembering the messages it was given."""
+
+    def __init__(self, *replies: dict[str, object]) -> None:
+        self.replies = list(replies)
+        self.calls: list[list[Message]] = []
+
+    def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
+        self.calls.append([*messages])
+        reply = self.replies[min(len(self.calls), len(self.replies)) - 1]
+        return {"content": "", "tool_calls": [], **reply}
+
+
+class SkillAndToolTests(unittest.TestCase):
     def test_skill_loader_reads_sample_skills(self) -> None:
-        skills = SkillLoader(Path("skills").resolve()).load_all()
+        skills = SkillLoader(LIBRARY).load_all()
 
         self.assertGreaterEqual(
             {skill.name for skill in skills},
@@ -23,12 +51,51 @@ class CoreTests(unittest.TestCase):
                 "file_manager",
                 "python_coder",
                 "windows_operator",
-                "project_manager",
                 "skill_creator",
                 "excel_file",
                 "ppt_file",
             },
         )
+
+    def test_skill_loader_can_restrict_to_named_skills(self) -> None:
+        skills = SkillLoader(LIBRARY, names={"datetime"}).load_all()
+
+        self.assertEqual([skill.name for skill in skills], ["datetime"])
+
+    def test_skill_loader_first_root_shadows_later_ones(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            own = Path(tmp) / "skills" / "datetime"
+            own.mkdir(parents=True)
+            (own / "SKILL.md").write_text("# datetime\n\n## Description\nlocal override\n", encoding="utf-8")
+
+            skills = SkillLoader([own.parent, LIBRARY], names={"datetime"}).load_all()
+
+        self.assertEqual([skill.name for skill in skills], ["datetime"])
+        self.assertIn("local override", skills[0].description)
+
+    def test_skill_loader_reads_script_tools(self) -> None:
+        names = {tool.name for tool in SkillLoader(LIBRARY).load_tools()}
+
+        for expected in (
+            "get_datetime",
+            "create_skill",
+            "validate_skill",
+            "read_excel",
+            "write_excel",
+            "read_ppt",
+            "write_ppt",
+            "take_screenshot",
+        ):
+            self.assertIn(expected, names)
+
+    def test_agent_registers_skill_script_tools(self) -> None:
+        agent = Agent(_config(), SkillLoader(LIBRARY))
+
+        self.assertIn("get_datetime", agent.tools.names())
+        self.assertIn("create_skill", agent.tools.names())
+        self.assertIn("read_excel", agent.tools.names())
 
     def test_workspace_path_rejects_parent_escape(self) -> None:
         workspace = (Path.cwd() / ".test-workspace").resolve()
@@ -96,275 +163,11 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("http(s)", result.content)
 
-    def test_message_payload_passes_through_multimodal_content(self) -> None:
-        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
-        blocks = [
-            {"type": "text", "text": "look:"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-        ]
-        message = Message(role="user", content=blocks)
-
-        payload = client._message_payload(message)
-
-        self.assertEqual(payload["content"], blocks)
-
-    def test_agent_forwards_tool_image_output_to_model(self) -> None:
-        class ImageTool:
-            name = "fake_capture"
-            description = "Return an image."
-            requires_confirmation = False
-            parameters = {"type": "object", "properties": {}, "additionalProperties": False}
-
-            def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-                return ToolResult(True, "captured", images=("data:image/png;base64,AAAA",))
-
-        class TwoStepLLM:
-            def __init__(self) -> None:
-                self.calls: list[list[Message]] = []
-
-            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
-                self.calls.append([*messages])
-                if len(self.calls) == 1:
-                    return {"content": "", "tool_calls": [{"id": "call_1", "name": "fake_capture", "arguments": {}}]}
-                return {"content": "I can see the image.", "tool_calls": []}
-
-        registry = ToolRegistry()
-        registry.register(ImageTool())
-        config = AgentConfig(
-            model="local",
-            workspace=Path.cwd().resolve(),
-            require_confirmation=False,
-            openai_api_key=None,
-            openai_base_url="https://api.openai.com/v1",
-        )
-        llm = TwoStepLLM()
-        agent = Agent(config, SkillLoader(Path("skills").resolve()), tools=registry, llm=llm)  # type: ignore[arg-type]
-
-        answer = agent.run("capture the screen")
-
-        self.assertEqual(answer, "I can see the image.")
-        image_messages = [
-            message
-            for message in llm.calls[1]
-            if message.role == "user"
-            and isinstance(message.content, list)
-            and any(block.get("type") == "image_url" for block in message.content)
-        ]
-        self.assertEqual(len(image_messages), 1)
-        image_block = next(b for b in image_messages[0].content if b.get("type") == "image_url")
-        self.assertEqual(image_block["image_url"]["url"], "data:image/png;base64,AAAA")
-
-    def test_local_fallback_agent_can_use_datetime(self) -> None:
-        config = AgentConfig(
-            model="local",
-            workspace=(Path.cwd() / ".test-workspace").resolve(),
-            require_confirmation=True,
-            openai_api_key=None,
-            openai_base_url="https://api.openai.com/v1",
-        )
-        agent = Agent(config, SkillLoader(Path("skills").resolve()))
-
-        answer = agent.run("date")
-
-        self.assertIn("[get_datetime]", answer)
-        self.assertIn("OK:", answer)
-
-    def test_openai_compatible_client_payload_shape(self) -> None:
-        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
-        message = Message(role="user", content="hello")
-
-        payload = client._message_payload(message)
-
-        self.assertEqual(payload, {"role": "user", "content": "hello"})
-
-    def test_openai_compatible_client_payload_shape_for_tool_loop(self) -> None:
-        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
-        assistant = Message(
-            role="assistant",
-            content="",
-            tool_calls=[{"id": "call_1", "name": "get_datetime", "arguments": {}}],
-        )
-        tool = Message(role="tool", content="OK: today", tool_call_id="call_1")
-
-        assistant_payload = client._message_payload(assistant)
-        tool_payload = client._message_payload(tool)
-
-        self.assertEqual(assistant_payload["tool_calls"][0]["function"]["name"], "get_datetime")
-        self.assertEqual(tool_payload["tool_call_id"], "call_1")
-
-    def test_openai_compatible_client_parses_tool_calls(self) -> None:
-        calls = OpenAICompatibleChatClient._tool_calls(
-            {
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "function": {
-                            "name": "get_datetime",
-                            "arguments": "{}",
-                        },
-                    }
-                ]
-            }
-        )
-
-        self.assertEqual(calls, [{"id": "call_1", "name": "get_datetime", "arguments": {}}])
-
-    def test_openai_compatible_client_wraps_timeout(self) -> None:
-        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1", timeout=1)
-
-        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
-            with self.assertRaisesRegex(RuntimeError, "timed out after 1 seconds"):
-                client._post_json("/chat/completions", {})
-
-    def test_agent_returns_tool_result_to_llm_for_final_answer(self) -> None:
-        class TwoStepLLM:
-            def __init__(self) -> None:
-                self.calls: list[list[Message]] = []
-
-            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
-                self.calls.append([*messages])
-                if len(self.calls) == 1:
-                    return {
-                        "content": "",
-                        "tool_calls": [{"id": "call_1", "name": "get_datetime", "arguments": {}}],
-                    }
-                tool_messages = [message for message in messages if message.role == "tool"]
-                return {"content": f"Final answer based on {tool_messages[-1].content}", "tool_calls": []}
-
-        config = AgentConfig(
-            model="local",
-            workspace=Path.cwd().resolve(),
-            require_confirmation=True,
-            openai_api_key=None,
-            openai_base_url="https://api.openai.com/v1",
-        )
-        llm = TwoStepLLM()
-        agent = Agent(config, SkillLoader(Path("skills").resolve()), llm=llm)  # type: ignore[arg-type]
-
-        answer = agent.run("date")
-
-        self.assertIn("Final answer based on [get_datetime]", answer)
-        self.assertEqual(len(llm.calls), 2)
-        self.assertTrue(any(message.role == "tool" for message in llm.calls[1]))
-
-    def test_agent_logs_conversation_tools_and_usage(self) -> None:
-        workspace = (Path.cwd() / ".test-log-workspace").resolve()
-        log_dir = workspace / "logs"
-        config = AgentConfig(
-            model="local",
-            workspace=workspace,
-            require_confirmation=True,
-            openai_api_key=None,
-            openai_base_url="https://api.openai.com/v1",
-            enable_logging=True,
-            log_dir=log_dir,
-        )
-        agent = Agent(config, SkillLoader(Path("skills").resolve()))
-
-        try:
-            answer = agent.run("date")
-            assert agent.logger is not None
-            session_id = agent.logger.session_id
-            conversation_log = log_dir / "conversations" / f"{session_id}.jsonl"
-            tool_log = log_dir / "tools" / f"{session_id}.jsonl"
-            usage_log = log_dir / "usage" / f"{session_id}.jsonl"
-            conversation_events = [
-                json.loads(line)["event"] for line in conversation_log.read_text(encoding="utf-8").splitlines()
-            ]
-            tool_events = [json.loads(line)["event"] for line in tool_log.read_text(encoding="utf-8").splitlines()]
-            usage_records = [json.loads(line) for line in usage_log.read_text(encoding="utf-8").splitlines()]
-        finally:
-            for path in (log_dir / "conversations").glob("*.jsonl"):
-                path.unlink(missing_ok=True)
-            for path in (log_dir / "tools").glob("*.jsonl"):
-                path.unlink(missing_ok=True)
-            for path in (log_dir / "usage").glob("*.jsonl"):
-                path.unlink(missing_ok=True)
-            for path in [log_dir / "conversations", log_dir / "tools", log_dir / "usage", log_dir, workspace]:
-                with suppress(OSError):
-                    path.rmdir()
-
-        self.assertIn("[get_datetime]", answer)
-        self.assertIn("user_message", conversation_events)
-        self.assertIn("final_answer", conversation_events)
-        self.assertIn("tool_result", tool_events)
-        self.assertGreaterEqual(usage_records[-1]["totals"]["total_tokens"], 1)
-
-    def test_skill_loader_reads_project_manager_script_tools(self) -> None:
-        tools = SkillLoader(Path("skills").resolve()).load_tools()
-        names = {tool.name for tool in tools}
-
-        self.assertIn("create_project", names)
-        self.assertIn("add_task", names)
-        self.assertIn("update_task", names)
-        self.assertIn("update_task_status", names)
-        self.assertIn("add_task_comment", names)
-        self.assertIn("show_project", names)
-        self.assertIn("list_projects", names)
-        self.assertIn("list_tasks", names)
-        self.assertIn("delete_task", names)
-        self.assertIn("delete_project", names)
-        self.assertIn("open_project_viewer", names)
-        self.assertIn("create_skill", names)
-        self.assertIn("validate_skill", names)
-        self.assertIn("read_excel", names)
-        self.assertIn("write_excel", names)
-        self.assertIn("read_ppt", names)
-        self.assertIn("write_ppt", names)
-        self.assertIn("git_status", names)
-        self.assertIn("git_diff", names)
-        self.assertIn("git_log", names)
-        self.assertIn("git_add", names)
-        self.assertIn("git_commit", names)
-        self.assertIn("take_screenshot", names)
-
-    def test_default_tools_do_not_include_portable_task_manager_tools(self) -> None:
-        names = default_tools().names()
-
-        self.assertNotIn("add_task", names)
-        self.assertNotIn("list_tasks", names)
-        self.assertNotIn("complete_task", names)
-        self.assertNotIn("delete_task", names)
-
-    def test_agent_registers_skill_script_tools(self) -> None:
-        config = AgentConfig(
-            model="local",
-            workspace=Path.cwd().resolve(),
-            require_confirmation=True,
-            openai_api_key=None,
-            openai_base_url="https://api.openai.com/v1",
-        )
-        agent = Agent(config, SkillLoader(Path("skills").resolve()))
-
-        self.assertIn("add_task", agent.tools.names())
-        self.assertIn("list_tasks", agent.tools.names())
-        self.assertIn("create_skill", agent.tools.names())
-        self.assertIn("read_excel", agent.tools.names())
-        self.assertIn("read_ppt", agent.tools.names())
-
-    def test_task_tools_can_add_and_list_tasks(self) -> None:
-        workspace = (Path.cwd() / ".test-task-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            added = tools.get("add_task").run(context, title="Write task manager tests", priority="high")
-            listed = tools.get("list_tasks").run(context, status="open")
-            stored = json.loads((workspace / "data" / "projects.json").read_text(encoding="utf-8"))
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        self.assertTrue(added.ok)
-        self.assertTrue(listed.ok)
-        self.assertIn("Write task manager tests", listed.content)
-        self.assertIn("Inbox", listed.content)
-        # Standalone TODOs land in the auto-created inbox project.
-        self.assertTrue(stored["projects"][0]["inbox"])
-
     def test_skill_creator_can_create_and_validate_skill(self) -> None:
         workspace = (Path.cwd() / ".test-skill-creator-workspace").resolve()
         context = ToolContext(workspace=workspace)
         tools = ToolRegistry()
-        for tool in SkillLoader(Path("skills").resolve()).load_tools():
+        for tool in SkillLoader(LIBRARY).load_tools():
             tools.register(tool)
 
         try:
@@ -399,7 +202,7 @@ class CoreTests(unittest.TestCase):
         workspace = (Path.cwd() / ".test-excel-workspace").resolve()
         context = ToolContext(workspace=workspace)
         tools = ToolRegistry()
-        for tool in SkillLoader(Path("skills").resolve()).load_tools():
+        for tool in SkillLoader(LIBRARY).load_tools():
             tools.register(tool)
 
         try:
@@ -426,7 +229,7 @@ class CoreTests(unittest.TestCase):
         workspace = (Path.cwd() / ".test-ppt-workspace").resolve()
         context = ToolContext(workspace=workspace)
         tools = ToolRegistry()
-        for tool in SkillLoader(Path("skills").resolve()).load_tools():
+        for tool in SkillLoader(LIBRARY).load_tools():
             tools.register(tool)
 
         try:
@@ -451,516 +254,374 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Roadmap", read.content)
         self.assertIn("Build skills", read.content)
 
-    @staticmethod
-    def _project_tools(workspace: Path) -> tuple[ToolContext, ToolRegistry]:
-        context = ToolContext(workspace=workspace)
-        tools = ToolRegistry()
-        for tool in SkillLoader(Path("skills").resolve()).load_tools():
-            tools.register(tool)
-        return context, tools
 
-    @staticmethod
-    def _cleanup_project_workspace(workspace: Path) -> None:
-        for name in (
-            "projects.json",
-            "projects.json.lock",
-            "projects.json.tmp",
-            "workflows.json",
-            "workflows.json.bak",
-            "tasks.json",
-            "tasks.json.bak",
-        ):
-            (workspace / "data" / name).unlink(missing_ok=True)
-        with suppress(OSError):
-            (workspace / "data").rmdir()
-        with suppress(OSError):
-            workspace.rmdir()
-
-    @staticmethod
-    def _read_projects(workspace: Path) -> dict:
-        return json.loads((workspace / "data" / "projects.json").read_text(encoding="utf-8"))
-
-    def test_project_tools_create_update_and_show(self) -> None:
-        workspace = (Path.cwd() / ".test-project-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            created = tools.get("create_project").run(
-                context,
-                title="Release prep",
-                goal="Ship v1",
-                tasks=[
-                    {"key": "t1", "title": "Draft the report", "assignee": "ai"},
-                    {"key": "t2", "title": "Review the report", "assignee": "human", "depends_on": ["t1"]},
-                ],
-            )
-            stored = self._read_projects(workspace)
-            project = stored["projects"][0]
-            task_ids = [task["id"] for task in project["tasks"]]
-            updated = tools.get("update_task_status").run(
-                context, task_id=task_ids[0], status="done", result="Saved draft.md"
-            )
-            shown = tools.get("show_project").run(context, project_id=project["id"])
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        self.assertTrue(created.ok)
-        self.assertEqual([len(task_id) for task_id in task_ids], [8, 8])
-        self.assertEqual(project["tasks"][1]["depends_on"], [task_ids[0]])
-        self.assertEqual(project["tasks"][1]["assignee"], "human")
-        self.assertTrue(updated.ok)
-        self.assertIn(f"READY: {task_ids[1]}(human)", updated.content)
-        self.assertTrue(shown.ok)
-        self.assertIn("<- READY", shown.content)
-
-    def test_project_create_rejects_invalid_input(self) -> None:
-        workspace = (Path.cwd() / ".test-project-invalid-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            cyclic = tools.get("create_project").run(
-                context,
-                title="Cyclic",
-                tasks=[
-                    {"key": "a", "title": "A", "assignee": "ai", "depends_on": ["b"]},
-                    {"key": "b", "title": "B", "assignee": "ai", "depends_on": ["a"]},
-                ],
-            )
-            unknown_dep = tools.get("create_project").run(
-                context,
-                title="Unknown dep",
-                tasks=[{"key": "a", "title": "A", "assignee": "ai", "depends_on": ["missing"]}],
-            )
-            bad_assignee = tools.get("create_project").run(
-                context,
-                title="Bad assignee",
-                tasks=[{"key": "a", "title": "A", "assignee": "robot"}],
-            )
-            file_created = (workspace / "data" / "projects.json").exists()
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        self.assertFalse(cyclic.ok)
-        self.assertIn("cycle", cyclic.content.lower())
-        self.assertFalse(unknown_dep.ok)
-        self.assertIn("unknown key", unknown_dep.content)
-        self.assertFalse(bad_assignee.ok)
-        self.assertIn("assignee", bad_assignee.content)
-        self.assertFalse(file_created)
-
-    def test_update_task_edits_fields_and_rejects_cycles(self) -> None:
-        workspace = (Path.cwd() / ".test-project-edit-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            tools.get("create_project").run(
-                context,
-                title="Edit me",
-                tasks=[
-                    {"key": "a", "title": "A", "assignee": "ai"},
-                    {"key": "b", "title": "B", "assignee": "ai", "depends_on": ["a"]},
-                ],
-            )
-            stored = self._read_projects(workspace)
-            ids = [task["id"] for task in stored["projects"][0]["tasks"]]
-
-            edited = tools.get("update_task").run(
-                context, task_id=ids[0], title="A2", assignee="human", due="tomorrow", priority="high"
-            )
-            cyclic = tools.get("update_task").run(context, task_id=ids[0], depends_on=[ids[1]])
-            self_dep = tools.get("update_task").run(context, task_id=ids[0], depends_on=[ids[0]])
-            stored_after = self._read_projects(workspace)
-            task_a = stored_after["projects"][0]["tasks"][0]
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        self.assertTrue(edited.ok)
-        self.assertEqual(task_a["title"], "A2")
-        self.assertEqual(task_a["assignee"], "human")
-        self.assertEqual(task_a["due"], "tomorrow")
-        self.assertEqual(task_a["priority"], "high")
-        self.assertFalse(cyclic.ok)
-        self.assertIn("cycle", cyclic.content.lower())
-        self.assertFalse(self_dep.ok)
-        self.assertEqual(task_a["depends_on"], [])
-
-    def test_assignee_name_for_human_tasks(self) -> None:
-        workspace = (Path.cwd() / ".test-project-name-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            tools.get("create_project").run(
-                context,
-                title="Named",
-                tasks=[
-                    {"key": "t1", "title": "Draft", "assignee": "ai"},
-                    {"key": "t2", "title": "Review", "assignee": "human", "assignee_name": "山田さん"},
-                ],
-            )
-            stored = self._read_projects(workspace)
-            ids = [task["id"] for task in stored["projects"][0]["tasks"]]
-            shown = tools.get("show_project").run(context)
-
-            # An ai task must not carry a name.
-            ai_named = tools.get("add_task").run(
-                context, title="Solo", assignee="ai", assignee_name="無視される"
-            )
-            # Renaming and then switching to ai clears the name.
-            renamed = tools.get("update_task").run(context, task_id=ids[1], assignee_name="田中さん")
-            to_ai = tools.get("update_task").run(context, task_id=ids[1], assignee="ai")
-            stored_after = self._read_projects(workspace)
-            tasks_after = {t["id"]: t for t in stored_after["projects"][0]["tasks"]}
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        review = tasks_after[ids[1]]
-        self.assertEqual(stored["projects"][0]["tasks"][1]["assignee_name"], "山田さん")
-        self.assertIn("[山田さん/pending]", shown.content)
-        self.assertTrue(ai_named.ok)
-        self.assertTrue(renamed.ok)
-        self.assertTrue(to_ai.ok)
-        self.assertEqual(review["assignee"], "ai")
-        self.assertEqual(review["assignee_name"], "")
-
-    def test_task_comments_from_agent_and_viewer(self) -> None:
-        from little_agent.viewer import viewer_add_comment
-
-        workspace = (Path.cwd() / ".test-project-comment-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            tools.get("create_project").run(
-                context,
-                title="Commented",
-                tasks=[{"key": "t1", "title": "Work", "assignee": "ai"}],
-            )
-            stored = self._read_projects(workspace)
-            project_id = stored["projects"][0]["id"]
-            task_id = stored["projects"][0]["tasks"][0]["id"]
-
-            agent_added = tools.get("add_task_comment").run(context, task_id=task_id, text="下書きを開始")
-            viewer_ok, _ = viewer_add_comment(
-                workspace, {"project_id": project_id, "task_id": task_id, "text": "方向性OKです"}
-            )
-            empty_rejected = tools.get("add_task_comment").run(context, task_id=task_id, text="  ")
-            shown = tools.get("show_project").run(context, project_id=project_id)
-            stored_after = self._read_projects(workspace)
-            comments = stored_after["projects"][0]["tasks"][0]["comments"]
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        self.assertTrue(agent_added.ok)
-        self.assertTrue(viewer_ok)
-        self.assertFalse(empty_rejected.ok)
-        self.assertEqual([c["via"] for c in comments], ["agent", "viewer"])
-        self.assertEqual([c["text"] for c in comments], ["下書きを開始", "方向性OKです"])
-        self.assertTrue(all(c["at"] for c in comments))
-        self.assertIn("comments=2", shown.content)
-        self.assertIn("方向性OKです", shown.content)
-
-    def test_delete_task_removes_dangling_dependencies(self) -> None:
-        workspace = (Path.cwd() / ".test-project-del-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            tools.get("create_project").run(
-                context,
-                title="Del",
-                tasks=[
-                    {"key": "a", "title": "A", "assignee": "ai"},
-                    {"key": "b", "title": "B", "assignee": "ai", "depends_on": ["a"]},
-                ],
-            )
-            stored = self._read_projects(workspace)
-            ids = [task["id"] for task in stored["projects"][0]["tasks"]]
-            deleted = tools.get("delete_task").run(context, task_id=ids[0])
-            stored_after = self._read_projects(workspace)
-            remaining = stored_after["projects"][0]["tasks"]
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        self.assertTrue(deleted.ok)
-        self.assertEqual([task["id"] for task in remaining], [ids[1]])
-        self.assertEqual(remaining[0]["depends_on"], [])
-
-    def test_migration_from_legacy_tasks_and_workflows(self) -> None:
-        workspace = (Path.cwd() / ".test-project-migrate-workspace").resolve()
-        data_dir = workspace / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        legacy_workflow = {
-            "version": 1,
-            "workflows": [
-                {
-                    "id": "wf000001",
-                    "title": "Old flow",
-                    "goal": "",
-                    "status": "active",
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "updated_at": "2026-01-01T00:00:00+00:00",
-                    "tasks": [
-                        {
-                            "id": "aaaa0001",
-                            "title": "Old task",
-                            "description": "",
-                            "assignee": "ai",
-                            "status": "pending",
-                            "depends_on": [],
-                            "result": "",
-                            "created_at": "2026-01-01T00:00:00+00:00",
-                            "started_at": None,
-                            "completed_at": None,
-                            "completed_via": None,
-                        }
-                    ],
-                }
-            ],
-        }
-        legacy_tasks = [
-            {
-                "id": "bbbb0001",
-                "title": "Buy milk",
-                "status": "open",
-                "created_at": "2026-01-02T00:00:00+00:00",
-                "due": "friday",
-                "priority": "high",
-                "notes": "2 bottles",
-            },
-            {"id": "bbbb0002", "title": "Done thing", "status": "done", "completed_at": "2026-01-03T00:00:00+00:00"},
+class LLMClientTests(unittest.TestCase):
+    def test_message_payload_passes_through_multimodal_content(self) -> None:
+        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
+        blocks = [
+            {"type": "text", "text": "look:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ]
-        (data_dir / "workflows.json").write_text(json.dumps(legacy_workflow), encoding="utf-8")
-        (data_dir / "tasks.json").write_text(json.dumps(legacy_tasks), encoding="utf-8")
-        context, tools = self._project_tools(workspace)
+        message = Message(role="user", content=blocks)
 
-        try:
-            listed = tools.get("list_projects").run(context, status="all")
-            stored = self._read_projects(workspace)
-            titles = {project["title"] for project in stored["projects"]}
-            inbox = next(project for project in stored["projects"] if project.get("inbox"))
-            migrated_open = next(task for task in inbox["tasks"] if task["id"] == "bbbb0001")
-            migrated_done = next(task for task in inbox["tasks"] if task["id"] == "bbbb0002")
-            legacy_backed_up = (
-                (data_dir / "workflows.json.bak").exists()
-                and (data_dir / "tasks.json.bak").exists()
-                and not (data_dir / "workflows.json").exists()
-                and not (data_dir / "tasks.json").exists()
-            )
-        finally:
-            self._cleanup_project_workspace(workspace)
+        payload = client._message_payload(message)
 
-        self.assertTrue(listed.ok)
-        self.assertEqual(titles, {"Old flow", "Inbox"})
-        self.assertEqual(migrated_open["status"], "pending")
-        self.assertEqual(migrated_open["description"], "2 bottles")
-        self.assertEqual(migrated_open["due"], "friday")
-        self.assertEqual(migrated_done["status"], "done")
-        self.assertTrue(legacy_backed_up)
+        self.assertEqual(payload["content"], blocks)
 
-    def test_project_viewer_serves_state_and_full_crud(self) -> None:
-        import threading
-        import urllib.error
-        import urllib.request
+    def test_openai_compatible_client_payload_shape(self) -> None:
+        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
+        message = Message(role="user", content="hello")
 
-        from little_agent.viewer import make_server
+        payload = client._message_payload(message)
 
-        workspace = (Path.cwd() / ".test-project-viewer-workspace").resolve()
-        workspace.mkdir(parents=True, exist_ok=True)
+        self.assertEqual(payload, {"role": "user", "content": "hello"})
 
-        def post_json(port: int, route: str, body: dict) -> tuple[int, dict]:
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{port}{route}",
-                data=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=5) as response:
-                    return response.status, json.loads(response.read().decode("utf-8"))
-            except urllib.error.HTTPError as error:
-                return error.code, json.loads(error.read().decode("utf-8"))
-
-        server = None
-        try:
-            server = make_server(workspace, 0)
-            port = server.server_address[1]
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-
-            proj_status, proj_body = post_json(port, "/api/project/create", {"title": "Viewer proj", "goal": "g"})
-            project_id = proj_body["id"]
-            task1_status, task1_body = post_json(
-                port, "/api/task/create", {"project_id": project_id, "title": "Step 1", "assignee": "ai"}
-            )
-            task1_id = task1_body["id"]
-            task2_status, task2_body = post_json(
-                port,
-                "/api/task/create",
-                {
-                    "project_id": project_id,
-                    "title": "Step 2",
-                    "assignee": "human",
-                    "assignee_name": "山田さん",
-                    "depends_on": [task1_id],
-                },
-            )
-            task2_id = task2_body["id"]
-            cycle_status, _cycle_body = post_json(
-                port,
-                "/api/task/update",
-                {"project_id": project_id, "task_id": task1_id, "depends_on": [task2_id]},
-            )
-            edit_status, _edit_body = post_json(
-                port,
-                "/api/task/update",
-                {"project_id": project_id, "task_id": task1_id, "status": "done", "title": "Step 1 (edited)"},
-            )
-            comment_status, _comment_body = post_json(
-                port,
-                "/api/task/comment",
-                {"project_id": project_id, "task_id": task1_id, "text": "経過メモ"},
-            )
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=5) as response:
-                state = json.loads(response.read().decode("utf-8"))
-            delete_status, _delete_body = post_json(
-                port, "/api/task/delete", {"project_id": project_id, "task_id": task2_id}
-            )
-            stored = self._read_projects(workspace)
-            tasks_after = stored["projects"][0]["tasks"]
-        finally:
-            if server is not None:
-                server.shutdown()
-                server.server_close()
-            self._cleanup_project_workspace(workspace)
-
-        self.assertEqual(state["app"], "little-agent-viewer")
-        self.assertEqual((proj_status, task1_status, task2_status), (200, 200, 200))
-        self.assertEqual(cycle_status, 409)
-        self.assertEqual(edit_status, 200)
-        self.assertEqual(comment_status, 200)
-        viewer_task = next(task for task in state["projects"][0]["tasks"] if task["id"] == task1_id)
-        self.assertEqual(viewer_task["status"], "done")
-        self.assertEqual(viewer_task["title"], "Step 1 (edited)")
-        self.assertEqual(viewer_task["completed_via"], "viewer")
-        self.assertEqual(viewer_task["created_via"], "viewer")
-        self.assertEqual([c["text"] for c in viewer_task["comments"]], ["経過メモ"])
-        self.assertEqual(viewer_task["comments"][0]["via"], "viewer")
-        human_task = next(task for task in state["projects"][0]["tasks"] if task["id"] == task2_id)
-        self.assertEqual(human_task["assignee_name"], "山田さん")
-        ready_flags = {task["id"]: task["ready"] for task in state["projects"][0]["tasks"]}
-        self.assertEqual(ready_flags, {task1_id: False, task2_id: True})
-        self.assertEqual(delete_status, 200)
-        self.assertEqual([task["id"] for task in tasks_after], [task1_id])
-
-    def test_project_update_breaks_stale_lock(self) -> None:
-        import os
-        import time
-
-        workspace = (Path.cwd() / ".test-project-lock-workspace").resolve()
-        context, tools = self._project_tools(workspace)
-
-        try:
-            tools.get("create_project").run(
-                context,
-                title="Locked",
-                tasks=[{"key": "t1", "title": "Only task", "assignee": "ai"}],
-            )
-            stored = self._read_projects(workspace)
-            task_id = stored["projects"][0]["tasks"][0]["id"]
-            lock_path = workspace / "data" / "projects.json.lock"
-            lock_path.write_text("", encoding="utf-8")
-            stale = time.time() - 60
-            os.utime(lock_path, (stale, stale))
-            updated = tools.get("update_task_status").run(context, task_id=task_id, status="done")
-        finally:
-            self._cleanup_project_workspace(workspace)
-
-        self.assertTrue(updated.ok)
-
-    def _reflect_agent(self, workspace: Path, llm: object, enable: bool = True) -> Agent:
-        config = AgentConfig(
-            model="test",
-            workspace=workspace,
-            require_confirmation=False,
-            openai_api_key=None,
-            openai_base_url="https://api.openai.com/v1",
-            enable_logging=False,
-            global_memory_path=workspace / "global_memory.md",
-            global_profile_path=workspace / "global_profile.md",
-            enable_auto_learning=enable,
+    def test_openai_compatible_client_payload_shape_for_tool_loop(self) -> None:
+        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1")
+        assistant = Message(
+            role="assistant",
+            content="",
+            tool_calls=[{"id": "call_1", "name": "get_datetime", "arguments": {}}],
         )
-        return Agent(config, SkillLoader(Path("skills").resolve()), llm=llm)  # type: ignore[arg-type]
+        tool = Message(role="tool", content="OK: today", tool_call_id="call_1")
 
-    def test_reflection_saves_and_injects_profiles(self) -> None:
-        class ReflectLLM:
-            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
-                system = str(messages[0].content) if messages else ""
-                if "durable memory" in system:
-                    return {
-                        "content": '{"global_profile": "- Prefers concise answers", '
-                        '"workspace_profile": "- Project: little_agent"}',
-                        "tool_calls": [],
+        assistant_payload = client._message_payload(assistant)
+        tool_payload = client._message_payload(tool)
+
+        self.assertEqual(assistant_payload["tool_calls"][0]["function"]["name"], "get_datetime")
+        self.assertEqual(tool_payload["tool_call_id"], "call_1")
+
+    def test_openai_compatible_client_parses_tool_calls(self) -> None:
+        calls = OpenAICompatibleChatClient._tool_calls(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {"name": "get_datetime", "arguments": "{}"},
                     }
-                return {"content": "done", "tool_calls": []}
+                ]
+            }
+        )
 
-        workspace = (Path.cwd() / ".test-reflect-workspace").resolve()
-        try:
-            agent = self._reflect_agent(workspace, ReflectLLM())
-            agent.run("help me refactor concisely")
-            learned = agent.end_session()
-            prompt = agent._system_prompt([]).content
-        finally:
-            for name in ("global_profile.md", "profile.md", "global_memory.md", "memory.md"):
-                (workspace / name).unlink(missing_ok=True)
-            with suppress(OSError):
-                workspace.rmdir()
+        self.assertEqual(calls, [{"id": "call_1", "name": "get_datetime", "arguments": {}}])
 
-        self.assertTrue(learned)
-        self.assertIn("Prefers concise answers", prompt)
-        self.assertIn("Project: little_agent", prompt)
+    def test_openai_compatible_client_wraps_timeout(self) -> None:
+        client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1", timeout=1)
 
-    def test_reflection_skipped_in_local_fallback(self) -> None:
-        from little_agent.llm import LocalRuleClient
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaisesRegex(RuntimeError, "timed out after 1 seconds"):
+                client._post_json("/chat/completions", {})
 
-        workspace = (Path.cwd() / ".test-reflect-local-workspace").resolve()
-        try:
-            agent = self._reflect_agent(workspace, LocalRuleClient())
-            agent.run("date")
-            learned = agent.end_session()
-            profile_exists = (workspace / "global_profile.md").exists()
-        finally:
-            for name in ("global_profile.md", "profile.md", "global_memory.md", "memory.md"):
-                (workspace / name).unlink(missing_ok=True)
-            with suppress(OSError):
-                workspace.rmdir()
 
-        self.assertFalse(learned)
-        self.assertFalse(profile_exists)
+class AgentLoopTests(unittest.TestCase):
+    def test_local_fallback_agent_can_use_datetime(self) -> None:
+        agent = Agent(_config((Path.cwd() / ".test-workspace")), SkillLoader(LIBRARY))
 
-    def test_reflection_is_noop_without_new_messages(self) -> None:
-        class ReflectLLM:
+        result = agent.run("date")
+
+        self.assertIn("[get_datetime]", result.text)
+        self.assertIn("OK:", result.text)
+        self.assertIsNone(result.data)
+
+    def test_agent_returns_tool_result_to_llm_for_final_answer(self) -> None:
+        class TwoStepLLM:
             def __init__(self) -> None:
-                self.reflect_calls = 0
+                self.calls: list[list[Message]] = []
 
             def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
-                if messages and "durable memory" in str(messages[0].content):
-                    self.reflect_calls += 1
-                    return {"content": '{"global_profile": "- x", "workspace_profile": ""}', "tool_calls": []}
-                return {"content": "done", "tool_calls": []}
+                self.calls.append([*messages])
+                if len(self.calls) == 1:
+                    return {
+                        "content": "",
+                        "tool_calls": [{"id": "call_1", "name": "get_datetime", "arguments": {}}],
+                    }
+                tool_messages = [message for message in messages if message.role == "tool"]
+                return {"content": f"Final answer based on {tool_messages[-1].content}", "tool_calls": []}
 
-        workspace = (Path.cwd() / ".test-reflect-noop-workspace").resolve()
-        llm = ReflectLLM()
+        llm = TwoStepLLM()
+        agent = Agent(_config(), SkillLoader(LIBRARY), llm=llm)  # type: ignore[arg-type]
+
+        result = agent.run("date")
+
+        self.assertIn("Final answer based on [get_datetime]", result.text)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertTrue(any(message.role == "tool" for message in llm.calls[1]))
+
+    def test_multi_step_tool_loop_runs_until_the_step_budget(self) -> None:
+        class NeverFinishes:
+            def __init__(self) -> None:
+                self.steps = 0
+
+            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
+                self.steps += 1
+                return {
+                    "content": "",
+                    "tool_calls": [{"id": f"c{self.steps}", "name": "get_datetime", "arguments": {}}],
+                }
+
+        llm = NeverFinishes()
+        agent = Agent(_config(max_tool_steps=3), SkillLoader(LIBRARY), llm=llm)  # type: ignore[arg-type]
+
+        result = agent.run("keep going")
+
+        self.assertEqual(llm.steps, 3)
+        self.assertIn("Stopped after 3 tool step(s)", result.text)
+
+    def test_agent_forwards_tool_image_output_to_model(self) -> None:
+        class ImageTool:
+            name = "fake_capture"
+            description = "Return an image."
+            requires_confirmation = False
+            parameters = {"type": "object", "properties": {}, "additionalProperties": False}
+
+            def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
+                return ToolResult(True, "captured", images=("data:image/png;base64,AAAA",))
+
+        registry = ToolRegistry()
+        registry.register(ImageTool())
+        llm = RecordingLLM(
+            {"tool_calls": [{"id": "call_1", "name": "fake_capture", "arguments": {}}]},
+            {"content": "I can see the image."},
+        )
+        agent = Agent(_config(require_confirmation=False), SkillLoader(LIBRARY), tools=registry, llm=llm)  # type: ignore[arg-type]
+
+        result = agent.run("capture the screen")
+
+        self.assertEqual(result.text, "I can see the image.")
+        image_messages = [
+            message
+            for message in llm.calls[1]
+            if message.role == "user"
+            and isinstance(message.content, list)
+            and any(block.get("type") == "image_url" for block in message.content)
+        ]
+        self.assertEqual(len(image_messages), 1)
+        image_block = next(b for b in image_messages[0].content if b.get("type") == "image_url")
+        self.assertEqual(image_block["image_url"]["url"], "data:image/png;base64,AAAA")
+
+    def test_unknown_tool_is_reported_to_the_model(self) -> None:
+        llm = RecordingLLM(
+            {"tool_calls": [{"id": "call_1", "name": "no_such_tool", "arguments": {}}]},
+            {"content": "understood"},
+        )
+        agent = Agent(_config(), SkillLoader(LIBRARY), tools=ToolRegistry(), llm=llm)  # type: ignore[arg-type]
+
+        agent.run("do something")
+
+        tool_messages = [message for message in llm.calls[1] if message.role == "tool"]
+        self.assertIn("Unknown tool: no_such_tool", str(tool_messages[-1].content))
+
+    def test_declined_confirmation_cancels_the_tool(self) -> None:
+        calls: list[str] = []
+
+        class WriteOnly:
+            name = "needs_ok"
+            description = "Needs confirmation."
+            requires_confirmation = True
+            parameters = {"type": "object", "properties": {}, "additionalProperties": False}
+
+            def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
+                calls.append("ran")
+                return ToolResult(True, "did it")
+
+        registry = ToolRegistry()
+        registry.register(WriteOnly())
+        llm = RecordingLLM(
+            {"tool_calls": [{"id": "call_1", "name": "needs_ok", "arguments": {}}]},
+            {"content": "ok then"},
+        )
+        agent = Agent(
+            _config(require_confirmation=True),
+            SkillLoader(LIBRARY),
+            tools=registry,
+            llm=llm,  # type: ignore[arg-type]
+            confirm=lambda _name, _args: False,
+        )
+
+        agent.run("write something")
+
+        self.assertEqual(calls, [])
+        tool_messages = [message for message in llm.calls[1] if message.role == "tool"]
+        self.assertIn("Cancelled by user", str(tool_messages[-1].content))
+
+    def test_agent_logs_conversation_tools_and_usage(self) -> None:
+        workspace = (Path.cwd() / ".test-log-workspace").resolve()
+        log_dir = workspace / "logs"
+        agent = Agent(
+            _config(workspace, enable_logging=True, log_dir=log_dir),
+            SkillLoader(LIBRARY),
+        )
+
         try:
-            agent = self._reflect_agent(workspace, llm)
-            agent.run("hi")
-            first = agent.end_session()
-            second = agent.end_session()
+            result = agent.run("date")
+            assert agent.logger is not None
+            session_id = agent.logger.session_id
+            conversation_log = log_dir / "conversations" / f"{session_id}.jsonl"
+            tool_log = log_dir / "tools" / f"{session_id}.jsonl"
+            usage_log = log_dir / "usage" / f"{session_id}.jsonl"
+            conversation_events = [
+                json.loads(line)["event"] for line in conversation_log.read_text(encoding="utf-8").splitlines()
+            ]
+            tool_events = [json.loads(line)["event"] for line in tool_log.read_text(encoding="utf-8").splitlines()]
+            usage_records = [json.loads(line) for line in usage_log.read_text(encoding="utf-8").splitlines()]
         finally:
-            for name in ("global_profile.md", "profile.md", "global_memory.md", "memory.md"):
-                (workspace / name).unlink(missing_ok=True)
-            with suppress(OSError):
-                workspace.rmdir()
+            for category in ("conversations", "tools", "usage"):
+                for path in (log_dir / category).glob("*.jsonl"):
+                    path.unlink(missing_ok=True)
+            for path in [log_dir / "conversations", log_dir / "tools", log_dir / "usage", log_dir, workspace]:
+                with suppress(OSError):
+                    path.rmdir()
 
-        self.assertTrue(first)
-        self.assertFalse(second)
-        self.assertEqual(llm.reflect_calls, 1)
+        self.assertIn("[get_datetime]", result.text)
+        self.assertIn("user_message", conversation_events)
+        self.assertIn("final_answer", conversation_events)
+        self.assertIn("tool_result", tool_events)
+        self.assertGreaterEqual(usage_records[-1]["totals"]["total_tokens"], 1)
+
+
+class StatelessnessTests(unittest.TestCase):
+    """Nothing an execution sees or does may leak into the next one."""
+
+    def test_second_run_sees_no_trace_of_the_first(self) -> None:
+        llm = RecordingLLM({"content": "first"}, {"content": "second"})
+        agent = Agent(_config(), SkillLoader(LIBRARY), llm=llm)  # type: ignore[arg-type]
+
+        agent.run("remember the passphrase swordfish")
+        agent.run("what was the passphrase?")
+
+        self.assertEqual(len(llm.calls[0]), 2)  # system + user, nothing else
+        self.assertEqual(len(llm.calls[1]), 2)
+        self.assertNotIn("swordfish", "\n".join(str(m.content) for m in llm.calls[1]))
+        self.assertEqual(llm.calls[0][0].content, llm.calls[1][0].content)  # identical system prompt
+
+    def test_context_is_used_for_this_run_only(self) -> None:
+        llm = RecordingLLM({"content": "ok"}, {"content": "ok"})
+        agent = Agent(_config(), SkillLoader(LIBRARY), llm=llm)  # type: ignore[arg-type]
+
+        agent.run("interpret this", context={"observation": {"temperature": 21}})
+        agent.run("and now?")
+
+        first = str(llm.calls[0][1].content)
+        second = "\n".join(str(m.content) for m in llm.calls[1])
+        self.assertIn("temperature", first)
+        self.assertNotIn("temperature", second)
+
+    def test_system_prompt_carries_no_memory_sections(self) -> None:
+        llm = RecordingLLM({"content": "ok"})
+        agent = Agent(_config(), SkillLoader(LIBRARY), llm=llm)  # type: ignore[arg-type]
+
+        agent.run("hello")
+
+        system = str(llm.calls[0][0].content)
+        for banned in ("Global Memory", "Workspace Memory", "User Profile", "Workspace Profile"):
+            self.assertNotIn(banned, system)
+
+    def test_confirmation_approval_does_not_persist_across_runs(self) -> None:
+        prompts: list[str] = []
+
+        class NeedsOk:
+            name = "needs_ok"
+            description = "Needs confirmation."
+            requires_confirmation = True
+            parameters = {"type": "object", "properties": {}, "additionalProperties": False}
+
+            def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
+                return ToolResult(True, "done")
+
+        registry = ToolRegistry()
+        registry.register(NeedsOk())
+
+        def confirm(name: str, _args: dict) -> bool:
+            prompts.append(name)
+            return True
+
+        class AlwaysCalls:
+            def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
+                if any(message.role == "tool" for message in messages):
+                    return {"content": "done", "tool_calls": []}
+                return {"content": "", "tool_calls": [{"id": "c1", "name": "needs_ok", "arguments": {}}]}
+
+        agent = Agent(
+            _config(require_confirmation=True),
+            SkillLoader(LIBRARY),
+            tools=registry,
+            llm=AlwaysCalls(),  # type: ignore[arg-type]
+            confirm=confirm,
+        )
+
+        agent.run("one")
+        agent.run("two")
+
+        self.assertEqual(prompts, ["needs_ok", "needs_ok"])
+
+
+class StructuredOutputTests(unittest.TestCase):
+    SCHEMA = {
+        "type": "object",
+        "properties": {
+            "state_deltas": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "required": ["state_deltas", "confidence"],
+        "additionalProperties": False,
+    }
+
+    def _agent(self, reply: str) -> tuple[Agent, RecordingLLM]:
+        llm = RecordingLLM({"content": reply})
+        return Agent(_config(), SkillLoader(LIBRARY), llm=llm), llm  # type: ignore[arg-type]
+
+    def test_valid_json_is_returned_as_data(self) -> None:
+        agent, llm = self._agent('{"state_deltas": ["a"], "confidence": 0.91}')
+
+        result = agent.run("interpret", output_schema=self.SCHEMA)
+
+        self.assertEqual(result.data, {"state_deltas": ["a"], "confidence": 0.91})
+        self.assertEqual(json.loads(result.text), result.data)
+        # The schema is put in front of the model as well as validated afterwards.
+        self.assertIn("state_deltas", str(llm.calls[0][0].content))
+
+    def test_fenced_json_is_accepted(self) -> None:
+        agent, _ = self._agent('```json\n{"state_deltas": [], "confidence": 0.5}\n```')
+
+        result = agent.run("interpret", output_schema=self.SCHEMA)
+
+        self.assertEqual(result.data, {"state_deltas": [], "confidence": 0.5})
+
+    def test_malformed_json_is_rejected_not_repaired(self) -> None:
+        agent, _ = self._agent('{"state_deltas": ["a", "confidence": 0.91')
+
+        with self.assertRaises(StructuredOutputError) as caught:
+            agent.run("interpret", output_schema=self.SCHEMA)
+        self.assertIn("not valid JSON", str(caught.exception))
+
+    def test_prose_answer_is_rejected(self) -> None:
+        agent, _ = self._agent("Sure! The confidence is about 0.9.")
+
+        with self.assertRaises(StructuredOutputError):
+            agent.run("interpret", output_schema=self.SCHEMA)
+
+    def test_schema_violation_is_rejected(self) -> None:
+        agent, _ = self._agent('{"state_deltas": ["a"]}')
+
+        with self.assertRaises(StructuredOutputError) as caught:
+            agent.run("interpret", output_schema=self.SCHEMA)
+        self.assertIn("confidence", str(caught.exception))
+
+    def test_wrong_type_is_rejected(self) -> None:
+        agent, _ = self._agent('{"state_deltas": "not-a-list", "confidence": 0.5}')
+
+        with self.assertRaises(StructuredOutputError) as caught:
+            agent.run("interpret", output_schema=self.SCHEMA)
+        self.assertIn("expected array", str(caught.exception))
+
+    def test_no_schema_returns_plain_text(self) -> None:
+        agent, llm = self._agent("just prose")
+
+        result = agent.run("say something")
+
+        self.assertEqual(result.text, "just prose")
+        self.assertIsNone(result.data)
+        self.assertNotIn("Required output format", str(llm.calls[0][0].content))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""End-to-end tests for A2A delegation.
+"""End-to-end tests for A2A: the protocol surface, structured parts, delegation.
 
 These drive a **real** A2A server over HTTP with the real client, so the Agent
 Card, JSON-RPC envelope, and task lifecycle are all exercised for real.
@@ -19,6 +19,7 @@ from tempfile import TemporaryDirectory
 
 from little_agent import agents
 from little_agent.a2a import models
+from little_agent.agent import RunResult
 from little_agent.a2a.client import A2AClient, A2AClientError, fetch_agent_card
 from little_agent.a2a.peers import PeerPool, parse_peers
 from little_agent.a2a.server import A2AService, serve
@@ -31,20 +32,40 @@ from little_agent.tools.delegation import DelegateTasksTool, DelegateTaskTool
 LIBRARY = Path("skills").resolve()
 
 
+def write_profile(agents_dir: Path, name: str, **profile) -> None:
+    """Create an agents/<name>/agent.json, the way an operator would."""
+
+    directory = agents_dir / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "agent.json").write_text(
+        json.dumps({"name": name, **profile}), encoding="utf-8"
+    )
+
+
 class ScriptedAgent:
     """Stands in for a real Agent inside the A2A server."""
 
-    def __init__(self, reply: str = "done", block: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        reply: str = "done",
+        block: threading.Event | None = None,
+        data: object = None,
+    ) -> None:
         self.reply = reply
         self.block = block
+        self.data = data
         self.prompts: list[str] = []
+        self.contexts: list[dict | None] = []
+        self.schemas: list[dict | None] = []
         self.depth: int | None = None
 
-    def run(self, user_text: str) -> str:
-        self.prompts.append(user_text)
+    def run(self, instruction, context=None, output_schema=None) -> RunResult:
+        self.prompts.append(instruction)
+        self.contexts.append(context)
+        self.schemas.append(output_schema)
         if self.block is not None:
             self.block.wait(5)
-        return self.reply
+        return RunResult(self.reply, data=self.data)
 
 
 def _config(workspace: Path, agents_dir: Path, max_depth: int = 2) -> AgentConfig:
@@ -154,7 +175,7 @@ class MessageSendTests(unittest.TestCase):
 
     def test_agent_failure_becomes_failed_task(self) -> None:
         class Boom:
-            def run(self, _text):
+            def run(self, _instruction, context=None, output_schema=None):
                 raise RuntimeError("kaboom")
 
         with ServedAgent(Boom()) as served:
@@ -252,6 +273,133 @@ class ProtocolErrorTests(unittest.TestCase):
             self.assertEqual(body["error"]["code"], models.CONTENT_TYPE_NOT_SUPPORTED)
 
 
+class PartsTests(unittest.TestCase):
+    """Requests and results carry text, structured data, or both."""
+
+    def test_text_part_request_and_text_part_response(self) -> None:
+        agent = ScriptedAgent("plain answer")
+        with ServedAgent(agent) as served:
+            task = A2AClient.connect(served.base_url).run_task("say something")
+
+            self.assertEqual(agent.prompts, ["say something"])
+            self.assertEqual(agent.contexts, [None])
+            parts = task["artifacts"][0]["parts"]
+            self.assertEqual([part["kind"] for part in parts], ["text"])
+            self.assertEqual(models.task_result_text(task), "plain answer")
+            self.assertIsNone(models.task_result_data(task))
+
+    def test_data_part_request_carries_instruction_context_and_schema(self) -> None:
+        agent = ScriptedAgent("ok")
+        with ServedAgent(agent) as served:
+            A2AClient.connect(served.base_url).run_task(
+                data={
+                    "instruction": "Interpret this observation",
+                    "context": {"observation": {"temp": 21}, "world_state": {"door": "open"}},
+                    "output_schema": {"type": "object"},
+                }
+            )
+
+            self.assertEqual(agent.prompts, ["Interpret this observation"])
+            self.assertEqual(
+                agent.contexts[0], {"observation": {"temp": 21}, "world_state": {"door": "open"}}
+            )
+            self.assertEqual(agent.schemas[0], {"type": "object"})
+
+    def test_bare_data_part_becomes_context(self) -> None:
+        agent = ScriptedAgent("ok")
+        with ServedAgent(agent) as served:
+            A2AClient.connect(served.base_url).run_task(
+                "summarize the reading", data={"observation": {"temp": 21}}
+            )
+
+            self.assertEqual(agent.prompts, ["summarize the reading"])
+            self.assertEqual(agent.contexts[0], {"observation": {"temp": 21}})
+
+    def test_data_part_response_round_trips(self) -> None:
+        agent = ScriptedAgent('{"confidence": 0.91}', data={"confidence": 0.91})
+        with ServedAgent(agent) as served:
+            task = A2AClient.connect(served.base_url).run_task(
+                data={"instruction": "score it", "output_schema": {"type": "object"}}
+            )
+
+            parts = task["artifacts"][0]["parts"]
+            self.assertEqual([part["kind"] for part in parts], ["data"])
+            self.assertEqual(models.task_result_data(task), {"confidence": 0.91})
+            # Text extraction still works for text-only consumers (e.g. delegation).
+            self.assertEqual(json.loads(models.task_result_text(task)), {"confidence": 0.91})
+
+    def test_message_with_neither_text_nor_instruction_is_rejected(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            request = urllib.request.Request(
+                served.base_url,
+                data=json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 9,
+                        "method": "message/send",
+                        "params": {
+                            "message": {
+                                "kind": "message",
+                                "role": "user",
+                                "parts": [{"kind": "data", "data": {"context": {"a": 1}}}],
+                            }
+                        },
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(body["error"]["code"], models.CONTENT_TYPE_NOT_SUPPORTED)
+
+    def test_structured_output_failure_becomes_a_failed_task(self) -> None:
+        class BadJSON:
+            def run(self, _instruction, context=None, output_schema=None):
+                from little_agent.agent import StructuredOutputError
+
+                raise StructuredOutputError("not valid JSON")
+
+        with ServedAgent(BadJSON()) as served:
+            task = A2AClient.connect(served.base_url).run_task(
+                data={"instruction": "x", "output_schema": {"type": "object"}}
+            )
+
+            self.assertEqual(task["status"]["state"], models.TASK_FAILED)
+            self.assertIn("not valid JSON", models.task_result_text(task))
+
+    def test_card_advertises_both_input_and_output_modes(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            card = fetch_agent_card(served.base_url)
+            self.assertIn("application/json", card["defaultInputModes"])
+            self.assertIn("application/json", card["defaultOutputModes"])
+
+
+class ParseRequestPartsTests(unittest.TestCase):
+    def test_text_and_data_instructions_are_combined(self) -> None:
+        payload = models.parse_request_parts(
+            [
+                models.text_part("first"),
+                models.data_part({"instruction": "second", "context": {"a": 1}}),
+            ]
+        )
+        self.assertEqual(payload.instruction, "first\n\nsecond")
+        self.assertEqual(payload.context, {"a": 1})
+
+    def test_several_bare_data_parts_merge_into_context(self) -> None:
+        payload = models.parse_request_parts(
+            [models.text_part("go"), models.data_part({"a": 1}), models.data_part({"b": 2})]
+        )
+        self.assertEqual(payload.context, {"a": 1, "b": 2})
+
+    def test_non_object_data_part_is_kept_as_context_data(self) -> None:
+        payload = models.parse_request_parts([models.text_part("go"), models.data_part([1, 2])])
+        self.assertEqual(payload.context, {"data": [[1, 2]]})
+
+    def test_no_parts_yields_an_empty_instruction(self) -> None:
+        self.assertEqual(models.parse_request_parts(None).instruction, "")
+        self.assertEqual(models.parse_request_parts([]).instruction, "")
+
+
 class AuthTests(unittest.TestCase):
     def test_token_required_when_configured(self) -> None:
         with ServedAgent(ScriptedAgent(), token="s3cret") as served:
@@ -313,7 +461,7 @@ class DelegateToolTests(unittest.TestCase):
 
     def test_failed_peer_task_surfaces_as_tool_error(self) -> None:
         class Boom:
-            def run(self, _text):
+            def run(self, _instruction, context=None, output_schema=None):
                 raise RuntimeError("peer exploded")
 
         with TemporaryDirectory() as tmp, ServedAgent(Boom()) as served:
@@ -336,14 +484,14 @@ class SlowAgent:
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def run(self, user_text: str) -> str:
+    def run(self, instruction, context=None, output_schema=None) -> RunResult:
         with self._lock:
-            self.prompts.append(user_text)
+            self.prompts.append(instruction)
             self.concurrent += 1
             self.peak = max(self.peak, self.concurrent)
         try:
             time.sleep(self.delay)
-            return f"{self.reply}:{user_text}"
+            return RunResult(f"{self.reply}:{instruction}")
         finally:
             with self._lock:
                 self.concurrent -= 1
@@ -485,7 +633,7 @@ class PeerRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             agents_dir = root / "agents"
-            agents.create_agent(agents_dir, LIBRARY, "office", skills=["datetime"])
+            write_profile(agents_dir, "office", skills=["datetime"])
             pool = PeerPool(_config(root, agents_dir))
             self.assertIn("office", pool.available())
             self.assertIn(agents.DEFAULT_AGENT_NAME, pool.available())
@@ -509,7 +657,7 @@ class LocalSpawnTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             agents_dir = root / "agents"
-            agents.create_agent(agents_dir, LIBRARY, "helper", skills=["datetime"])
+            write_profile(agents_dir, "helper", skills=["datetime"])
             pool = PeerPool(_config(root, agents_dir))
             try:
                 client = pool.connect(name="helper")
@@ -531,7 +679,7 @@ class LocalSpawnTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             agents_dir = root / "agents"
-            agents.create_agent(agents_dir, LIBRARY, "helper", skills=["datetime"])
+            write_profile(agents_dir, "helper", skills=["datetime"])
             pool = PeerPool(_config(root, agents_dir))
             try:
                 with ThreadPoolExecutor(max_workers=4) as executor:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from little_agent.skills.models import Skill
@@ -9,13 +10,20 @@ from little_agent.skills.script_tool import ScriptSkillTool
 
 
 class SkillLoader:
-    def __init__(self, skills_dir: Path) -> None:
-        self.skills_dir = skills_dir
+    """Loads skills from one or more directories of skill folders.
+
+    ``roots`` are directories that each contain ``<skill>/SKILL.md`` folders,
+    searched in order; the first root holding a given skill folder wins, so an
+    agent's own copy shadows the shared library. ``names`` optionally restricts
+    loading to those skill folder names (the agent profile's capability list).
+    """
+
+    def __init__(self, roots: Path | Sequence[Path], names: Iterable[str] | None = None) -> None:
+        self.roots = [roots] if isinstance(roots, Path) else list(roots)
+        self.names = set(names) if names is not None else None
 
     def load_all(self) -> list[Skill]:
-        if not self.skills_dir.exists():
-            return []
-        return [self._load(path) for path in sorted(self.skills_dir.glob("*/SKILL.md"))]
+        return [self._load(path) for path in self._skill_files("SKILL.md")]
 
     def select_for_text(self, text: str, limit: int = 3) -> list[Skill]:
         skills = self.load_all()
@@ -24,15 +32,27 @@ class SkillLoader:
         return selected[:limit]
 
     def load_tools(self) -> list[ScriptSkillTool]:
-        if not self.skills_dir.exists():
-            return []
         tools: list[ScriptSkillTool] = []
-        for manifest_path in sorted(self.skills_dir.glob("*/tools.json")):
+        for manifest_path in self._skill_files("tools.json"):
             try:
                 tools.extend(self._load_tools_manifest(manifest_path))
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 print(f"Warning: skipped invalid skill tool manifest {manifest_path}: {exc}")
         return tools
+
+    def _skill_files(self, filename: str) -> list[Path]:
+        """Matching files across the roots, one per skill folder name."""
+
+        found: dict[str, Path] = {}
+        for root in self.roots:
+            if not root.exists():
+                continue
+            for path in sorted(root.glob(f"*/{filename}")):
+                skill_name = path.parent.name
+                if self.names is not None and skill_name not in self.names:
+                    continue
+                found.setdefault(skill_name, path)
+        return [found[name] for name in sorted(found)]
 
     def _load(self, path: Path) -> Skill:
         raw = path.read_text(encoding="utf-8")

@@ -28,15 +28,12 @@ class AgentConfig:
     enable_logging: bool = False
     log_dir: Path | None = None
     llm_timeout_seconds: int = 60
-    global_memory_path: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "memory.md")
     commands_dir: Path = field(default_factory=lambda: (Path.cwd() / "commands").resolve())
     global_commands_dir: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "commands")
     skill_library_dir: Path = field(default_factory=lambda: (Path.cwd() / "skills").resolve())
     agents_dir: Path = field(default_factory=lambda: (Path.cwd() / "agents").resolve())
     active_agent: str | None = None
     stop_hotkey: str = "<ctrl>+<alt>+q"
-    global_profile_path: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "profile.md")
-    enable_auto_learning: bool = True
     # How deep delegate_task may nest sub-agents (0 disables delegation entirely).
     max_delegation_depth: int = 2
     # How many subtasks delegate_tasks runs concurrently.
@@ -49,8 +46,6 @@ class AgentConfig:
         configured_log_dir = Path(os.getenv("LITTLE_AGENT_LOG_DIR", "logs"))
         log_dir = configured_log_dir if configured_log_dir.is_absolute() else workspace / configured_log_dir
         log_dir = log_dir.resolve()
-        raw_global_memory = os.getenv("LITTLE_AGENT_GLOBAL_MEMORY_PATH")
-        global_memory_path = Path(raw_global_memory).resolve() if raw_global_memory else Path.home() / ".little_agent" / "memory.md"
         configured_commands_dir = Path(os.getenv("LITTLE_AGENT_COMMANDS_DIR", "commands"))
         commands_dir = configured_commands_dir if configured_commands_dir.is_absolute() else workspace / configured_commands_dir
         commands_dir = commands_dir.resolve()
@@ -63,8 +58,6 @@ class AgentConfig:
         agents_dir = configured_agents_dir if configured_agents_dir.is_absolute() else workspace / configured_agents_dir
         agents_dir = agents_dir.resolve()
         active_agent = os.getenv("LITTLE_AGENT_AGENT") or None
-        raw_global_profile = os.getenv("LITTLE_AGENT_GLOBAL_PROFILE_PATH")
-        global_profile_path = Path(raw_global_profile).resolve() if raw_global_profile else Path.home() / ".little_agent" / "profile.md"
         return cls(
             model=os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini"),
             workspace=workspace,
@@ -75,15 +68,12 @@ class AgentConfig:
             enable_logging=_as_bool(os.getenv("LITTLE_AGENT_ENABLE_LOGGING"), True),
             log_dir=log_dir,
             llm_timeout_seconds=int(os.getenv("LITTLE_AGENT_TIMEOUT_SECONDS", "60")),
-            global_memory_path=global_memory_path,
             commands_dir=commands_dir,
             global_commands_dir=global_commands_dir,
             skill_library_dir=skill_library_dir,
             agents_dir=agents_dir,
             active_agent=active_agent,
             stop_hotkey=os.getenv("LITTLE_AGENT_STOP_HOTKEY", "<ctrl>+<alt>+q"),
-            global_profile_path=global_profile_path,
-            enable_auto_learning=_as_bool(os.getenv("LITTLE_AGENT_AUTO_LEARNING"), True),
             max_delegation_depth=int(os.getenv("LITTLE_AGENT_MAX_DELEGATION_DEPTH", "2")),
             max_parallel_delegations=max(
                 1, int(os.getenv("LITTLE_AGENT_MAX_PARALLEL_DELEGATIONS", "4"))
