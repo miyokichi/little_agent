@@ -302,6 +302,8 @@ def _cmd_config(ctx: CommandContext, args: str) -> DispatchResult:
         "Configuration:",
         f"  model              : {config.model}",
         f"  workspace          : {config.workspace}",
+        f"  readable_paths     : {_paths_text(config.readable_paths)}",
+        f"  writable_paths     : {_paths_text(config.writable_paths)}",
         f"  require_confirmation: {config.require_confirmation}",
         f"  max_tool_steps     : {config.max_tool_steps}",
         f"  enable_logging     : {config.enable_logging}",
@@ -316,6 +318,10 @@ def _cmd_config(ctx: CommandContext, args: str) -> DispatchResult:
 def _cmd_reload(ctx: CommandContext, args: str) -> DispatchResult:
     count = ctx.registry.reload_custom()
     return DispatchResult(output=f"Reloaded custom commands ({count} found). Skills reload automatically each turn.")
+
+
+def _paths_text(paths: tuple[Path, ...]) -> str:
+    return ", ".join(str(path) for path in paths) if paths else "(none)"
 
 
 def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:

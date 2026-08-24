@@ -1,5 +1,7 @@
 from contextlib import suppress
 import json
+import os
+import tempfile
 from unittest.mock import patch
 import unittest
 from pathlib import Path
@@ -100,8 +102,109 @@ class SkillAndToolTests(unittest.TestCase):
     def test_workspace_path_rejects_parent_escape(self) -> None:
         workspace = (Path.cwd() / ".test-workspace").resolve()
 
-        with self.assertRaisesRegex(ValueError, "outside workspace"):
+        with self.assertRaisesRegex(ValueError, "outside allowed read paths"):
             resolve_workspace_path(workspace, "..")
+
+    def test_filesystem_tools_honor_extra_readable_and_writable_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            workspace = root / "workspace"
+            readable = root / "readable"
+            writable = root / "writable"
+            outside = root / "outside"
+            for directory in (workspace, readable, writable, outside):
+                directory.mkdir()
+            (workspace / "in.txt").write_text("workspace", encoding="utf-8")
+            (readable / "in.txt").write_text("readable", encoding="utf-8")
+            (writable / "in.txt").write_text("writable", encoding="utf-8")
+            (outside / "in.txt").write_text("outside", encoding="utf-8")
+
+            context = ToolContext(
+                workspace=workspace,
+                readable_paths=(readable,),
+                writable_paths=(writable,),
+            )
+            tools = default_tools()
+
+            workspace_read = tools.get("read_file").run(context, path="in.txt")
+            workspace_write = tools.get("write_file").run(context, path="out.txt", content="ok")
+            readable_read = tools.get("read_file").run(context, path=str(readable / "in.txt"))
+            writable_read = tools.get("read_file").run(context, path=str(writable / "in.txt"))
+            writable_write = tools.get("write_file").run(
+                context,
+                path=str(writable / "out.txt"),
+                content="ok",
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside allowed write paths"):
+                tools.get("write_file").run(context, path=str(readable / "out.txt"), content="no")
+            with self.assertRaisesRegex(ValueError, "outside allowed read paths"):
+                tools.get("read_file").run(context, path=str(outside / "in.txt"))
+            with self.assertRaisesRegex(ValueError, "outside allowed write paths"):
+                tools.get("write_file").run(context, path=str(outside / "out.txt"), content="no")
+
+            self.assertTrue(workspace_read.ok)
+            self.assertTrue(workspace_write.ok)
+            self.assertTrue(readable_read.ok)
+            self.assertTrue(writable_read.ok)
+            self.assertTrue(writable_write.ok)
+            self.assertEqual((workspace / "out.txt").read_text(encoding="utf-8"), "ok")
+            self.assertEqual((writable / "out.txt").read_text(encoding="utf-8"), "ok")
+
+    def test_file_level_readable_and_writable_paths_are_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            workspace = root / "workspace"
+            workspace.mkdir()
+            readable_file = root / "readable.txt"
+            writable_file = root / "writable.txt"
+            readable_file.write_text("readable", encoding="utf-8")
+            writable_file.write_text("writable", encoding="utf-8")
+
+            context = ToolContext(
+                workspace=workspace,
+                readable_paths=(readable_file,),
+                writable_paths=(writable_file,),
+            )
+            tools = default_tools()
+
+            self.assertEqual(tools.get("read_file").run(context, path=str(readable_file)).content, "readable")
+            with self.assertRaisesRegex(ValueError, "outside allowed read paths"):
+                tools.get("read_file").run(context, path=str(readable_file / "child.txt"))
+            with self.assertRaisesRegex(ValueError, "outside allowed write paths"):
+                tools.get("write_file").run(context, path=str(readable_file), content="no")
+
+            self.assertEqual(tools.get("read_file").run(context, path=str(writable_file)).content, "writable")
+            written = tools.get("write_file").run(context, path=str(writable_file), content="updated")
+            with self.assertRaisesRegex(ValueError, "outside allowed write paths"):
+                tools.get("write_file").run(context, path=str(writable_file / "child.txt"), content="no")
+
+            self.assertTrue(written.ok)
+            self.assertEqual(writable_file.read_text(encoding="utf-8"), "updated")
+
+    def test_path_traversal_and_symlink_escape_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            workspace = root / "workspace"
+            allowed = root / "allowed"
+            outside = root / "outside"
+            for directory in (workspace, allowed, outside):
+                directory.mkdir()
+            (outside / "secret.txt").write_text("secret", encoding="utf-8")
+            context = ToolContext(workspace=workspace, readable_paths=(allowed,), writable_paths=(allowed,))
+            tools = default_tools()
+
+            with self.assertRaisesRegex(ValueError, "outside allowed read paths"):
+                tools.get("read_file").run(context, path="../outside/secret.txt")
+
+            link = allowed / "secret-link.txt"
+            try:
+                os.symlink(outside / "secret.txt", link)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "outside allowed read paths"):
+                tools.get("read_file").run(context, path=str(link))
 
     def test_filesystem_append_delete_move_tools(self) -> None:
         workspace = (Path.cwd() / ".test-fs-workspace").resolve()

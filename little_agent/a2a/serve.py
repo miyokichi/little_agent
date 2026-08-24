@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import os
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from little_agent import agents
@@ -93,9 +95,22 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Allow tools that normally require confirmation (no human is at this server).",
     )
+    parser.add_argument(
+        "--readable-path",
+        action="append",
+        default=[],
+        help="Additional file or directory path that tools may read. Repeatable.",
+    )
+    parser.add_argument(
+        "--writable-path",
+        action="append",
+        default=[],
+        help="Additional file or directory path that tools may read and write. Repeatable.",
+    )
     args = parser.parse_args(argv)
 
     config = AgentConfig.from_env()
+    config = _with_cli_paths(config, args.readable_path, args.writable_path)
     config.workspace.mkdir(parents=True, exist_ok=True)
     profile = agents.resolve_active(config, args.agent)
     token = os.getenv("LITTLE_AGENT_A2A_TOKEN") or None
@@ -121,6 +136,20 @@ def main(argv: list[str] | None = None) -> None:
 
 def _env_flag(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _with_cli_paths(
+    config: AgentConfig,
+    readable_paths: list[str],
+    writable_paths: list[str],
+) -> AgentConfig:
+    if not readable_paths and not writable_paths:
+        return config
+    return replace(
+        config,
+        readable_paths=(*config.readable_paths, *(Path(path).resolve() for path in readable_paths)),
+        writable_paths=(*config.writable_paths, *(Path(path).resolve() for path in writable_paths)),
+    )
 
 
 if __name__ == "__main__":

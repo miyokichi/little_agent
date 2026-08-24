@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from little_agent.tools.base import ToolContext, ToolResult, resolve_workspace_path
+from little_agent.tools.base import ToolContext, ToolResult
 
 
 class ListDirTool:
@@ -19,7 +17,8 @@ class ListDirTool:
     }
 
     def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-        path = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        policy = context.path_policy
+        path = policy.resolve(str(kwargs["path"]), access="read")
         if not path.exists():
             return ToolResult(False, f"Directory does not exist: {path}")
         if not path.is_dir():
@@ -27,7 +26,7 @@ class ListDirTool:
         rows = []
         for child in sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
             kind = "dir " if child.is_dir() else "file"
-            rows.append(f"{kind} {child.relative_to(context.workspace)}")
+            rows.append(f"{kind} {policy.display(child)}")
         return ToolResult(True, "\n".join(rows) if rows else "(empty)")
 
 
@@ -45,7 +44,7 @@ class ReadFileTool:
     }
 
     def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-        path = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        path = context.path_policy.resolve(str(kwargs["path"]), access="read")
         if not path.exists():
             return ToolResult(False, f"File does not exist: {path}")
         if not path.is_file():
@@ -68,10 +67,11 @@ class WriteFileTool:
     }
 
     def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-        path = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        policy = context.path_policy
+        path = policy.resolve(str(kwargs["path"]), access="write")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(kwargs["content"]), encoding="utf-8")
-        return ToolResult(True, f"Wrote {path.relative_to(context.workspace)}")
+        return ToolResult(True, f"Wrote {policy.display(path)}")
 
 
 class AppendFileTool:
@@ -89,13 +89,14 @@ class AppendFileTool:
     }
 
     def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-        path = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        policy = context.path_policy
+        path = policy.resolve(str(kwargs["path"]), access="write")
         if path.exists() and not path.is_file():
             return ToolResult(False, f"Path is not a file: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(str(kwargs["content"]))
-        return ToolResult(True, f"Appended to {path.relative_to(context.workspace)}")
+        return ToolResult(True, f"Appended to {policy.display(path)}")
 
 
 class DeleteFileTool:
@@ -112,13 +113,14 @@ class DeleteFileTool:
     }
 
     def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-        path = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        policy = context.path_policy
+        path = policy.resolve(str(kwargs["path"]), access="write")
         if not path.exists():
             return ToolResult(False, f"File does not exist: {path}")
         if not path.is_file():
             return ToolResult(False, f"Path is not a file: {path}")
         path.unlink()
-        return ToolResult(True, f"Deleted {path.relative_to(context.workspace)}")
+        return ToolResult(True, f"Deleted {policy.display(path)}")
 
 
 class MoveFileTool:
@@ -136,8 +138,9 @@ class MoveFileTool:
     }
 
     def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-        source = resolve_workspace_path(context.workspace, str(kwargs["source"]))
-        destination = resolve_workspace_path(context.workspace, str(kwargs["destination"]))
+        policy = context.path_policy
+        source = policy.resolve(str(kwargs["source"]), access="write")
+        destination = policy.resolve(str(kwargs["destination"]), access="write")
         if not source.exists():
             return ToolResult(False, f"Source does not exist: {source}")
         if not source.is_file():
@@ -146,8 +149,8 @@ class MoveFileTool:
             return ToolResult(False, f"Destination already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         source.replace(destination)
-        rel_source = source.relative_to(context.workspace)
-        rel_destination = destination.relative_to(context.workspace)
+        rel_source = policy.display(source)
+        rel_destination = policy.display(destination)
         return ToolResult(True, f"Moved {rel_source} -> {rel_destination}")
 
 
@@ -166,7 +169,8 @@ class SearchFilesTool:
     }
 
     def run(self, context: ToolContext, **kwargs: object) -> ToolResult:
-        root = resolve_workspace_path(context.workspace, str(kwargs["path"]))
+        policy = context.path_policy
+        root = policy.resolve(str(kwargs["path"]), access="read")
         query = str(kwargs["query"])
         if not root.exists():
             return ToolResult(False, f"Path does not exist: {root}")
@@ -174,12 +178,12 @@ class SearchFilesTool:
         matches: list[str] = []
         for file_path in files:
             try:
+                file_path = policy.resolve(str(file_path), access="read")
                 lines = file_path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, ValueError):
                 continue
             for index, line in enumerate(lines, start=1):
                 if query in line:
-                    rel = file_path.relative_to(context.workspace)
+                    rel = policy.display(file_path)
                     matches.append(f"{rel}:{index}: {line}")
         return ToolResult(True, "\n".join(matches[:200]) if matches else "(no matches)")
-

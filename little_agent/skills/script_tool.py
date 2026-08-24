@@ -23,6 +23,8 @@ class ScriptSkillTool:
         payload = {
             "tool": self.name,
             "workspace": str(context.workspace),
+            "readable_paths": [str(path) for path in context.readable_paths],
+            "writable_paths": [str(path) for path in context.writable_paths],
             "arguments": kwargs,
         }
         completed = subprocess.run(
@@ -53,4 +55,3 @@ class ScriptSkillTool:
             content=str(data.get("content", "")),
             images=images,
         )
-

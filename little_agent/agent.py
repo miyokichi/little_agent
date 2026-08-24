@@ -226,8 +226,11 @@ class Agent:
         content = (
             "You are Little Agent, a stateless task runner. You are given one task, "
             "with everything you need to do it. Use tools when they help. Keep actions "
-            "inside the configured workspace. Prefer concise, practical answers.\n\n"
+            "inside the configured workspace and explicitly allowed paths. "
+            "Prefer concise, practical answers.\n\n"
             f"Workspace: {self.config.workspace}\n\n"
+            f"Readable paths: {_paths_text(self.config.readable_paths)}\n"
+            f"Writable paths: {_paths_text(self.config.writable_paths)}\n\n"
             f"Available tools:\n{self.tools.descriptions()}\n\n"
             f"Relevant skills:\n{skill_text}"
         )
@@ -259,6 +262,8 @@ class Agent:
             execution.approved = True
         context = ToolContext(
             workspace=self.config.workspace,
+            readable_paths=self.config.readable_paths,
+            writable_paths=self.config.writable_paths,
             require_confirmation=self.config.require_confirmation,
         )
         try:
@@ -340,6 +345,10 @@ class Agent:
 
 # Sentinel distinguishing "parsed to JSON null" from "did not parse".
 _INVALID = object()
+
+
+def _paths_text(paths: tuple[Any, ...]) -> str:
+    return ", ".join(str(path) for path in paths) if paths else "(none)"
 
 
 def _parse_json(raw: str) -> Any:

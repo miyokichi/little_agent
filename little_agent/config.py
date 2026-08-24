@@ -17,6 +17,12 @@ def _as_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _path_list(value: str | None) -> tuple[Path, ...]:
+    if not value:
+        return ()
+    return tuple(Path(item.strip()).resolve() for item in value.split(os.pathsep) if item.strip())
+
+
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     model: str
@@ -24,6 +30,8 @@ class AgentConfig:
     require_confirmation: bool
     openai_api_key: str | None
     openai_base_url: str
+    readable_paths: tuple[Path, ...] = ()
+    writable_paths: tuple[Path, ...] = ()
     max_tool_steps: int = 5
     enable_logging: bool = False
     log_dir: Path | None = None
@@ -61,6 +69,8 @@ class AgentConfig:
         return cls(
             model=os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini"),
             workspace=workspace,
+            readable_paths=_path_list(os.getenv("LITTLE_AGENT_READABLE_PATHS")),
+            writable_paths=_path_list(os.getenv("LITTLE_AGENT_WRITABLE_PATHS")),
             require_confirmation=_as_bool(os.getenv("LITTLE_AGENT_REQUIRE_CONFIRMATION"), True),
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),

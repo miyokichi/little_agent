@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from little_agent import agents
@@ -83,6 +85,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--host", default="127.0.0.1", help="A2A bind address (with --serve-a2a).")
     parser.add_argument("--port", type=int, help="A2A port (with --serve-a2a).")
     parser.add_argument(
+        "--readable-path",
+        action="append",
+        default=[],
+        help="Additional file or directory path that tools may read. Repeatable.",
+    )
+    parser.add_argument(
+        "--writable-path",
+        action="append",
+        default=[],
+        help="Additional file or directory path that tools may read and write. Repeatable.",
+    )
+    parser.add_argument(
         "--auto-approve",
         action="store_true",
         help="With --serve-a2a: allow tools that normally require confirmation.",
@@ -99,10 +113,15 @@ def main(argv: list[str] | None = None) -> None:
             serve_argv += ["--port", str(args.port)]
         if args.auto_approve:
             serve_argv.append("--auto-approve")
+        for path in args.readable_path:
+            serve_argv += ["--readable-path", path]
+        for path in args.writable_path:
+            serve_argv += ["--writable-path", path]
         a2a_serve.main(serve_argv)
         return
 
     config = AgentConfig.from_env()
+    config = _with_cli_paths(config, args.readable_path, args.writable_path)
     config.workspace.mkdir(parents=True, exist_ok=True)
     stop = StopController(config.stop_hotkey)
     confirm = _make_confirm(config.stop_hotkey)
@@ -153,6 +172,20 @@ def main(argv: list[str] | None = None) -> None:
         print()
 
     _shutdown()
+
+
+def _with_cli_paths(
+    config: AgentConfig,
+    readable_paths: list[str],
+    writable_paths: list[str],
+) -> AgentConfig:
+    if not readable_paths and not writable_paths:
+        return config
+    return replace(
+        config,
+        readable_paths=(*config.readable_paths, *(Path(path).resolve() for path in readable_paths)),
+        writable_paths=(*config.writable_paths, *(Path(path).resolve() for path in writable_paths)),
+    )
 
 
 def _shutdown() -> None:
