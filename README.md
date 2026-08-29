@@ -592,6 +592,7 @@ python -m pytest -q
 | `tests/test_schema.py` | 内蔵JSON Schemaバリデータ |
 | `tests/test_agents.py` | Agent Profile（Skill/Tool/委譲の制限、profile解決） |
 | `tests/test_commands.py` | スラッシュコマンド |
+| `tests/test_workspace_harness.py` | `workspace_harness` Skillのタスクフォルダ操作 |
 
 ## 拡張方法
 
