@@ -9,9 +9,10 @@ and no persistent memory is read or written on anyone's behalf. Tools that need
 confirmation are refused unless auto-approval is enabled, because a served agent
 has no human at a prompt.
 
-A caller may ask to work in a particular directory (``workspace``) and to reach
-named paths outside it (``allowed_paths``). Both are authorized here against this
-server's own workspace and writable paths before any work starts.
+A caller may ask to work in a particular directory (``workspace``, read+write)
+and to read named paths outside it (``allowed_paths``, read only). Each is
+authorized here against the matching half of this server's own configuration
+before any work starts.
 """
 
 from __future__ import annotations
@@ -72,10 +73,10 @@ def build_service(
 ) -> A2AService:
     """Build the served A2A service for a profile.
 
-    The caller's requested workspace and paths are authorized against this
-    server's own writable roots, so a peer can only ever be handed a directory
-    this server could already reach. ``allow_any_path`` lifts that check for a
-    deliberately open, private server.
+    The caller's requested workspace is authorized against this server's writable
+    roots and its allowed paths against the readable ones, so a peer can only
+    ever be handed access this server already has. ``allow_any_path`` lifts that
+    check for a deliberately open, private server.
     """
 
     description = profile.description or f"Little Agent profile '{profile.name}'."
@@ -127,7 +128,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH",
-        help="Additional file or directory path that tools may read. Repeatable.",
+        help=(
+            "File or directory this agent may read, and may grant to a task as a "
+            "read-only allowed path. Repeatable."
+        ),
     )
     parser.add_argument(
         "--writable-path",
@@ -136,7 +140,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "File or directory outside the workspace this agent may read and write, "
-            "and may grant to a task. Repeatable."
+            "and may grant to a task as its workspace. Repeatable."
         ),
     )
     parser.add_argument(
@@ -173,8 +177,14 @@ def run(args: argparse.Namespace) -> None:
     print(f"Auth: {'bearer token required' if token else 'none'}")
     print(f"Confirmation-required tools: {'auto-approved' if auto_approve else 'denied'}")
     print(f"Workspace: {config.workspace}")
-    grantable = ", ".join(str(path) for path in config.writable_paths) or "(workspace only)"
-    print(f"Grantable paths: {'any (unrestricted)' if allow_any_path else grantable}")
+    if allow_any_path:
+        print("Grantable as a workspace (read+write): any (unrestricted)")
+        print("Grantable as an allowed path (read):   any (unrestricted)")
+    else:
+        writable = ", ".join(str(path) for path in config.writable_paths)
+        readable = ", ".join(str(path) for path in (*config.writable_paths, *config.readable_paths))
+        print(f"Grantable as a workspace (read+write): {writable or '(workspace only)'}")
+        print(f"Grantable as an allowed path (read):   {readable or '(workspace only)'}")
     print("Memory: off (each task is independent; nothing is persisted)")
     print("Ctrl+C to stop.")
     try:

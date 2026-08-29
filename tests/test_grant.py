@@ -19,6 +19,7 @@ from little_agent.a2a.grant import (
     WorkGrant,
 )
 from little_agent.config import AgentConfig
+from little_agent.tools.base import PathAccessPolicy
 
 LIBRARY = Path("skills").resolve()
 
@@ -77,7 +78,7 @@ class WireFormatTests(unittest.TestCase):
 
 
 class ApplyTests(unittest.TestCase):
-    def test_workspace_and_paths_replace_the_config(self) -> None:
+    def test_workspace_is_the_writable_home_and_allowed_paths_are_read_only(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             config = _config(root)
@@ -85,7 +86,27 @@ class ApplyTests(unittest.TestCase):
                 workspace=root / "case-7", allowed_paths=(root / "shared",)
             ).apply(config)
             self.assertEqual(granted.workspace, root / "case-7")
-            self.assertEqual(granted.writable_paths, (root / "shared",))
+            self.assertEqual(granted.readable_paths, (root / "shared",))
+            self.assertNotIn(root / "shared", granted.writable_paths)
+
+    def test_the_resulting_policy_lets_the_task_read_but_not_write_an_allowed_path(self) -> None:
+        """The grant has to survive contact with the path policy the tools use."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            reference = root / "shared" / "prices.xlsx"
+            reference.parent.mkdir(parents=True)
+            reference.write_text("x", encoding="utf-8")
+            granted = WorkGrant(
+                workspace=root / "case-7", allowed_paths=(root / "shared",)
+            ).apply(_config(root))
+            policy = PathAccessPolicy(
+                granted.workspace, granted.readable_paths, granted.writable_paths
+            )
+
+            self.assertEqual(policy.resolve(str(reference), access="read"), reference)
+            with self.assertRaises(ValueError):
+                policy.resolve(str(reference), access="write")
 
     def test_an_empty_grant_changes_nothing(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -95,8 +116,17 @@ class ApplyTests(unittest.TestCase):
     def test_omitted_paths_keep_the_server_configuration(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            config = _config(root, writable=(root / "own",))
+            config = _config(root, writable=(root / "own",), readable=(root / "ref",))
             granted = WorkGrant(workspace=root / "case-7").apply(config)
+            self.assertEqual(granted.readable_paths, (root / "ref",))
+
+    def test_a_grant_never_touches_the_servers_own_writable_paths(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            config = _config(root, writable=(root / "own",))
+            granted = WorkGrant(
+                workspace=root / "case-7", allowed_paths=(root / "shared",)
+            ).apply(config)
             self.assertEqual(granted.writable_paths, (root / "own",))
 
 
@@ -113,7 +143,7 @@ class PolicyTests(unittest.TestCase):
             policy = GrantPolicy.from_config(_config(Path(tmp)))
             with self.assertRaises(GrantError) as caught:
                 policy.authorize(WorkGrant(workspace=Path(other).resolve()))
-            self.assertIn("outside the accessible paths", str(caught.exception))
+            self.assertIn("outside the writable paths", str(caught.exception))
 
     def test_a_configured_writable_path_may_be_granted(self) -> None:
         with TemporaryDirectory() as tmp, TemporaryDirectory() as shared:
@@ -122,14 +152,51 @@ class PolicyTests(unittest.TestCase):
             grant = WorkGrant(allowed_paths=(shared_root / "prices.xlsx",))
             self.assertEqual(policy.authorize(grant).allowed_paths, (shared_root / "prices.xlsx",))
 
-    def test_a_merely_readable_path_may_not_be_granted(self) -> None:
-        """A grant conveys write access, so read-only reach is not yours to pass on."""
+    def test_writable_roots_are_readable_too(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            policy = GrantPolicy(writable_roots=(root,))
+            self.assertIn(root, policy.readable_roots)
+
+    def test_a_readable_path_may_be_granted_as_an_allowed_path(self) -> None:
+        """allowed_paths convey read only, so read-only reach is enough to pass on."""
 
         with TemporaryDirectory() as tmp, TemporaryDirectory() as reference:
             reference_root = Path(reference).resolve()
             policy = GrantPolicy.from_config(_config(Path(tmp), readable=(reference_root,)))
-            with self.assertRaises(GrantError):
-                policy.authorize(WorkGrant(allowed_paths=(reference_root / "notes.md",)))
+            grant = WorkGrant(allowed_paths=(reference_root / "notes.md",))
+            self.assertEqual(
+                policy.authorize(grant).allowed_paths, (reference_root / "notes.md",)
+            )
+
+    def test_a_readable_path_may_not_become_a_workspace(self) -> None:
+        """A workspace is written in, so read-only reach is not enough."""
+
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as reference:
+            reference_root = Path(reference).resolve()
+            policy = GrantPolicy.from_config(_config(Path(tmp), readable=(reference_root,)))
+            with self.assertRaises(GrantError) as caught:
+                policy.authorize(WorkGrant(workspace=reference_root))
+            self.assertIn("outside the writable paths", str(caught.exception))
+
+    def test_a_writable_path_may_be_granted_either_way(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as shared:
+            shared_root = Path(shared).resolve()
+            policy = GrantPolicy.from_config(_config(Path(tmp), writable=(shared_root,)))
+            self.assertEqual(
+                policy.authorize(WorkGrant(workspace=shared_root)).workspace, shared_root
+            )
+            self.assertEqual(
+                policy.authorize(WorkGrant(allowed_paths=(shared_root,))).allowed_paths,
+                (shared_root,),
+            )
+
+    def test_an_unreachable_path_is_refused_as_an_allowed_path_too(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
+            policy = GrantPolicy.from_config(_config(Path(tmp)))
+            with self.assertRaises(GrantError) as caught:
+                policy.authorize(WorkGrant(allowed_paths=(Path(outside).resolve(),)))
+            self.assertIn("outside the readable paths", str(caught.exception))
 
     def test_allow_any_accepts_anything(self) -> None:
         with TemporaryDirectory() as tmp, TemporaryDirectory() as other:
@@ -138,7 +205,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(policy.authorize(grant).workspace, Path(other).resolve())
 
     def test_an_empty_grant_needs_no_authorization(self) -> None:
-        policy = GrantPolicy(roots=())
+        policy = GrantPolicy(writable_roots=())
         self.assertTrue(policy.authorize(WorkGrant()).is_empty)
 
     def test_a_granted_file_root_only_matches_itself(self) -> None:
@@ -149,9 +216,11 @@ class PolicyTests(unittest.TestCase):
             sibling = root / "secret.xlsx"
             sibling.write_text("x", encoding="utf-8")
 
-            policy = GrantPolicy(roots=(granted_file,))
-            self.assertEqual(policy.authorize(WorkGrant(allowed_paths=(granted_file,))).allowed_paths,
-                             (granted_file,))
+            policy = GrantPolicy(writable_roots=(granted_file,))
+            self.assertEqual(
+                policy.authorize(WorkGrant(allowed_paths=(granted_file,))).allowed_paths,
+                (granted_file,),
+            )
             with self.assertRaises(GrantError):
                 policy.authorize(WorkGrant(allowed_paths=(sibling,)))
 

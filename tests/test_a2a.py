@@ -75,6 +75,7 @@ def _config(
     agents_dir: Path,
     max_depth: int = 2,
     writable: tuple[Path, ...] = (),
+    readable: tuple[Path, ...] = (),
 ) -> AgentConfig:
     return AgentConfig(
         model="local",
@@ -87,6 +88,7 @@ def _config(
         agents_dir=agents_dir.resolve(),
         max_delegation_depth=max_depth,
         writable_paths=tuple(path.resolve() for path in writable),
+        readable_paths=tuple(path.resolve() for path in readable),
     )
 
 
@@ -763,7 +765,7 @@ class WorkGrantOverA2ATests(unittest.TestCase):
             root = Path(tmp).resolve()
             case = root / "case-7"
             case.mkdir()
-            policy = GrantPolicy(roots=(root,))
+            policy = GrantPolicy(writable_roots=(root,))
             with ServedAgent(ScriptedAgent(), grant_policy=policy) as served:
                 client = A2AClient.connect(served.base_url)
                 task = client.run_task(
@@ -786,7 +788,7 @@ class WorkGrantOverA2ATests(unittest.TestCase):
 
     def test_a_server_refuses_a_path_it_cannot_reach(self) -> None:
         with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
-            policy = GrantPolicy(roots=(Path(tmp).resolve(),))
+            policy = GrantPolicy(writable_roots=(Path(tmp).resolve(),))
             with ServedAgent(ScriptedAgent(), grant_policy=policy) as served:
                 client = A2AClient.connect(served.base_url)
                 with self.assertRaises(A2AClientError) as caught:
@@ -795,7 +797,127 @@ class WorkGrantOverA2ATests(unittest.TestCase):
                     )
             message = str(caught.exception)
             self.assertIn(str(models.INVALID_PARAMS), message)
-            self.assertIn("outside the accessible paths", message)
+            self.assertIn("outside the writable paths", message)
+
+    def test_a_readable_only_path_is_grantable_as_an_allowed_path(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as reference:
+            root = Path(tmp).resolve()
+            reference_root = Path(reference).resolve()
+            policy = GrantPolicy(writable_roots=(root,), readable_roots=(reference_root,))
+            with ServedAgent(ScriptedAgent(), grant_policy=policy) as served:
+                client = A2AClient.connect(served.base_url)
+                task = client.run_task(
+                    "read the reference",
+                    timeout=10,
+                    grant=WorkGrant(
+                        workspace=root, allowed_paths=(reference_root / "notes.md",)
+                    ),
+                )
+            self.assertEqual(task["status"]["state"], models.TASK_COMPLETED)
+            self.assertEqual(served.grants[0].allowed_paths, (reference_root / "notes.md",))
+
+    def test_a_readable_only_path_is_refused_as_a_workspace(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as reference:
+            reference_root = Path(reference).resolve()
+            policy = GrantPolicy(
+                writable_roots=(Path(tmp).resolve(),), readable_roots=(reference_root,)
+            )
+            with ServedAgent(ScriptedAgent(), grant_policy=policy) as served:
+                client = A2AClient.connect(served.base_url)
+                with self.assertRaises(A2AClientError) as caught:
+                    client.run_task(
+                        "work there", timeout=10, grant=WorkGrant(workspace=reference_root)
+                    )
+            self.assertIn("outside the writable paths", str(caught.exception))
+
+    def test_a_granted_allowed_path_is_readable_but_not_writable(self) -> None:
+        """End to end: the peer can read the reference, and cannot overwrite it."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            home = root / "server-home"
+            case = root / "case-7"
+            shared = root / "shared"
+            for directory in (home, case, shared):
+                directory.mkdir()
+            (shared / "prices.txt").write_text("100 yen", encoding="utf-8")
+            config = _config(home, root / "agents")
+            profile = agents.default_profile(config)
+            outcomes: list[str] = []
+
+            class ReadThenWriteClient:
+                """Reads the granted reference, then tries to overwrite it."""
+
+                def __init__(self) -> None:
+                    self.step = 0
+
+                def complete(self, model, messages, tools):
+                    for message in messages:
+                        if message.role == "tool":
+                            outcomes.append(str(message.content))
+                    self.step += 1
+                    if self.step == 1:
+                        return {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "c1",
+                                    "name": "read_file",
+                                    "arguments": {"path": str(shared / "prices.txt")},
+                                }
+                            ],
+                        }
+                    if self.step == 2:
+                        return {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "c2",
+                                    "name": "write_file",
+                                    "arguments": {
+                                        "path": str(shared / "prices.txt"),
+                                        "content": "999 yen",
+                                    },
+                                }
+                            ],
+                        }
+                    return {"content": "done", "tool_calls": []}
+
+            def factory(depth, stop, grant):
+                agent = build_agent(
+                    grant.apply(config), profile, lambda *_: True, stop, depth=depth
+                )
+                agent.llm = ReadThenWriteClient()
+                return agent
+
+            service = A2AService(
+                _card(0),
+                factory,
+                grace_seconds=5.0,
+                grant_policy=GrantPolicy(writable_roots=(root,)),
+            )
+            httpd = serve(service, "127.0.0.1", 0)
+            port = httpd.server_address[1]
+            service.card["url"] = f"http://127.0.0.1:{port}/"
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            try:
+                client = A2AClient.connect(service.card["url"])
+                client.run_task(
+                    "look and then meddle",
+                    timeout=15,
+                    grant=WorkGrant(workspace=case, allowed_paths=(shared,)),
+                )
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+            joined = " ".join(outcomes)
+            self.assertIn("100 yen", joined)
+            self.assertIn("outside allowed write paths", joined)
+            # The reference survived untouched.
+            self.assertEqual(
+                (shared / "prices.txt").read_text(encoding="utf-8"), "100 yen"
+            )
 
     def test_an_ungranted_task_runs_in_the_servers_own_workspace(self) -> None:
         with ServedAgent(ScriptedAgent()) as served:
@@ -844,7 +966,7 @@ class WorkGrantOverA2ATests(unittest.TestCase):
                 return agent
 
             service = A2AService(
-                _card(0), factory, grace_seconds=5.0, grant_policy=GrantPolicy(roots=(root,))
+                _card(0), factory, grace_seconds=5.0, grant_policy=GrantPolicy(writable_roots=(root,))
             )
             httpd = serve(service, "127.0.0.1", 0)
             port = httpd.server_address[1]
@@ -875,7 +997,7 @@ class DelegationGrantTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             (root / "case-7").mkdir()
-            policy = GrantPolicy(roots=(root,))
+            policy = GrantPolicy(writable_roots=(root,))
             with ServedAgent(agent, grant_policy=policy) as served:
                 config = _config(root, root / "agents")
                 tool = DelegateTaskTool(config=config, depth=0, pool=PeerPool(config))
@@ -889,7 +1011,7 @@ class DelegationGrantTests(unittest.TestCase):
             self.assertTrue(result.ok, result.content)
             self.assertEqual(served.grants[0].workspace, root / "case-7")
 
-    def test_a_path_the_caller_cannot_write_is_refused_before_sending(self) -> None:
+    def test_a_path_the_caller_cannot_reach_is_refused_before_sending(self) -> None:
         agent = ScriptedAgent("done")
         with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
             root = Path(tmp).resolve()
@@ -906,6 +1028,47 @@ class DelegationGrantTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertIn("Cannot hand over that work directory", result.content)
             # Nothing was sent: the peer never heard about the subtask.
+            self.assertEqual(agent.prompts, [])
+
+    def test_a_readable_only_path_can_be_handed_on_as_reference(self) -> None:
+        """Read-only reach is enough for allowed_paths, which convey read only."""
+
+        agent = ScriptedAgent("done")
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as reference:
+            root = Path(tmp).resolve()
+            reference_root = Path(reference).resolve()
+            with ServedAgent(agent, grant_policy=GrantPolicy(allow_any=True)) as served:
+                config = _config(root, root / "agents", readable=(reference_root,))
+                tool = DelegateTaskTool(config=config, depth=0, pool=PeerPool(config))
+                result = tool.run(
+                    ToolContext(root),
+                    task="consult the reference",
+                    agent_url=served.base_url,
+                    allowed_paths=[str(reference_root / "notes.md")],
+                )
+
+            self.assertTrue(result.ok, result.content)
+            self.assertEqual(served.grants[0].allowed_paths, (reference_root / "notes.md",))
+
+    def test_a_readable_only_path_cannot_be_handed_on_as_a_workspace(self) -> None:
+        """A workspace is written in, so the caller must be able to write it."""
+
+        agent = ScriptedAgent("done")
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as reference:
+            root = Path(tmp).resolve()
+            reference_root = Path(reference).resolve()
+            with ServedAgent(agent, grant_policy=GrantPolicy(allow_any=True)) as served:
+                config = _config(root, root / "agents", readable=(reference_root,))
+                tool = DelegateTaskTool(config=config, depth=0, pool=PeerPool(config))
+                result = tool.run(
+                    ToolContext(root),
+                    task="work in the reference folder",
+                    agent_url=served.base_url,
+                    workspace=str(reference_root),
+                )
+
+            self.assertFalse(result.ok)
+            self.assertIn("outside the writable paths", result.content)
             self.assertEqual(agent.prompts, [])
 
     def test_a_configured_writable_path_may_be_handed_on(self) -> None:
@@ -931,7 +1094,7 @@ class DelegationGrantTests(unittest.TestCase):
             root = Path(tmp).resolve()
             for name in ("case-a", "case-b"):
                 (root / name).mkdir()
-            policy = GrantPolicy(roots=(root,))
+            policy = GrantPolicy(writable_roots=(root,))
             with ServedAgent(ScriptedAgent("done"), grant_policy=policy) as served:
                 config = _config(root, root / "agents")
                 tool = DelegateTasksTool(config=config, depth=0, pool=PeerPool(config))
@@ -951,7 +1114,7 @@ class DelegationGrantTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
             root = Path(tmp).resolve()
             (root / "case-a").mkdir()
-            policy = GrantPolicy(roots=(root,))
+            policy = GrantPolicy(writable_roots=(root,))
             with ServedAgent(ScriptedAgent("done"), grant_policy=policy) as served:
                 config = _config(root, root / "agents")
                 tool = DelegateTasksTool(config=config, depth=0, pool=PeerPool(config))

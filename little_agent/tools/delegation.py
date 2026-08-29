@@ -7,9 +7,10 @@ Two tools share one code path:
   (each its own A2A task, optionally on different peers) and collect them.
 
 A subtask can also say *where* it happens: ``workspace`` is the directory the
-peer treats as its workspace for that task and ``allowed_paths`` lists files and
-directories outside it the peer may read and write. Both are checked against what
-this agent can write before they are sent, and again by the peer on arrival (see
+peer works in (read and write) and ``allowed_paths`` lists reference files and
+directories outside it the peer may read. Each is checked against the matching
+half of what this agent can reach — writable for the workspace, readable for the
+allowed paths — before anything is sent, and again by the peer on arrival (see
 :mod:`little_agent.a2a.grant`).
 
 Both are A2A **clients**: discover the peer's Agent Card, send ``message/send``,
@@ -48,12 +49,14 @@ _AGENT_URL_DESCRIPTION = (
 )
 _BACKGROUND_DESCRIPTION = "Optional background or source material to send before the task."
 _WORKSPACE_DESCRIPTION = (
-    "Optional directory the peer should treat as its workspace for this subtask. "
-    "Relative to your own workspace, or an absolute path you can already reach."
+    "Optional directory the peer should treat as its workspace for this subtask, where "
+    "it reads and writes. Relative to your own workspace, or an absolute path you can "
+    "write yourself. The peer's output belongs here."
 )
 _ALLOWED_PATHS_DESCRIPTION = (
-    "Optional files or directories OUTSIDE that workspace the peer may read and write. "
-    "You can only hand over paths you can write yourself, and the peer checks them again."
+    "Optional reference files or directories OUTSIDE that workspace the peer may READ "
+    "(not write). You can only hand over paths you can read yourself, and the peer "
+    "checks them again."
 )
 
 
@@ -82,8 +85,9 @@ class _DelegationRunner:
         self._pool = pool
         self._stop = stop
         self._timeout = timeout
-        # What this agent may hand on: only what it can write itself, so a
-        # delegation can never widen its own reach.
+        # What this agent may hand on: a workspace only from what it can write,
+        # reference paths only from what it can read. A delegation can never
+        # widen its own reach.
         self._policy = GrantPolicy.from_config(config)
 
     @property

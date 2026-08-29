@@ -80,8 +80,8 @@ little-agent serve-a2a --agent observer --port 8801 # A2Aサーバとして公�
 | オプション | 内容 |
 | --- | --- |
 | `--agent <name>` | 使うAgent Profile（省略時は `default`、chatでは対話選択） |
-| `--readable-path <PATH>` | ワークスペース外で**読める**パスを追加（繰り返し可） |
-| `--writable-path <PATH>` | ワークスペース外で**読み書きできる**パスを追加（繰り返し可） |
+| `--readable-path <PATH>` | ワークスペース外で**読める**パスを追加（繰り返し可）。A2Aで参照用に渡せる範囲でもある |
+| `--writable-path <PATH>` | ワークスペース外で**読み書きできる**パスを追加（繰り返し可）。A2Aで作業場所として渡せる範囲でもある |
 
 `serve-a2a` のみ: `--host`、`--port`、`--auto-approve`、`--allow-any-path`。
 
@@ -174,7 +174,7 @@ writable  = workspace + LITTLE_AGENT_WRITABLE_PATHS
 
 - 区切りはWindowsなら `;`、それ以外は `:`。相対パスはワークスペース基準です。
 - ディレクトリを指定すればその配下すべて、単一ファイルを指定すればそのファイルだけが対象になります。
-- 書き込み可能なパスは、**A2Aで他エージェントに渡せる範囲**でもあります（[workspace / allowed_paths](#ワークの受け渡し先を指定するworkspace--allowed_paths)）。読むだけのパスは渡せません。
+- 到達できる範囲は、そのまま**A2Aで他エージェントに渡せる範囲**になります（[workspace / allowed_paths](#ワークの受け渡し先を指定するworkspace--allowed_paths)）。書けるパスは作業場所として、読めるパスは参照用として渡せます。
 - 有効な範囲は system prompt にも出るので、モデルは自分がどこまで触れるかを知った上で動きます。
 
 ## Tool仕様
@@ -367,7 +367,7 @@ Little Agent の外部インタフェースは A2A です。Agent Card による
 | メソッド | `message/send`、`tasks/get`、`tasks/cancel` |
 | Part | `TextPart` と `DataPart`（入力・出力とも） |
 | タスク状態 | `submitted` / `working` / `completed` / `canceled` / `failed` |
-| 作業場所 | metadata で `workspace` / `allowed_paths` を要求可（サーバ側で検証） |
+| 作業場所 | metadata で `workspace`（読み書き）/ `allowed_paths`（読み取りのみ）を要求可。サーバ側で権限種別ごとに検証 |
 | 認可 | `LITTLE_AGENT_A2A_TOKEN` による Bearer トークン |
 | 未対応 | `message/stream`（SSE）は `-32004 UnsupportedOperation`、`tasks/pushNotificationConfig/*` は `-32003 PushNotificationNotSupported` |
 
@@ -437,33 +437,48 @@ Skill名を直接指定する独自パラメータはありません。能力の
 
 「この案件フォルダで作業して」「共有ドライブのこの資料も見ていい」という**作業場所ごと**の受け渡しができます。`workspace` と `allowed_paths` はA2Aメッセージの metadata（`littleAgent/workspace` / `littleAgent/allowedPaths`）に載り、受け取った側は**自分の設定に照らして検査**してから、そのタスク専用の作業範囲として採用します。理解しない相手はmetadataを無視して自分のワークスペースで動くだけなので、相互運用性は壊れません。
 
+**2つは権限が違います。**
+
+| 項目 | 相手に与える権限 | 意味 |
+| --- | --- | --- |
+| `workspace` | **読み書き** | 相手がそのタスクで作業する場所。成果物はここに置く |
+| `allowed_paths` | **読み取りのみ** | その外にある参照資料。渡した資料を相手に書き換えられることはない |
+
 ```jsonc
 // delegate_task の引数
 {
-  "task": "reports/q3 の下書きを仕上げて data/売上.xlsx の数字と突き合わせて",
+  "task": "reports/q3 の下書きを仕上げて 売上.xlsx の数字と突き合わせて",
   "agent": "office",
-  "workspace": "reports/q3",                 // 自分のワークスペース基準の相対パスでよい
-  "allowed_paths": ["D:\\shared\\売上.xlsx"]  // ワークスペース外は明示的に渡す
+  "workspace": "reports/q3",                 // 作業場所（読み書き）。相対パスでよい
+  "allowed_paths": ["D:\\shared\\売上.xlsx"]  // 参照だけ（読み取り専用）
 }
 ```
 
 - `workspace` を渡すと、相手はそのディレクトリを**そのタスクのワークスペース**として動きます（相対パスのTool引数もそこ基準）。ディレクトリが無ければ作成されます。省略すると相手自身のワークスペースのままです。
-- `allowed_paths` はワークスペース**外**の例外リストで、読み書き両方を意味します。渡さなければ相手側の設定のままで、上書きしません。
+- `allowed_paths` はワークスペース**外**を読むための例外リストです。書き込みは通らないので、成果物は `workspace` の側に作らせます。渡さなければ相手側の設定のままで、上書きしません。
+- 相手自身の `LITTLE_AGENT_WRITABLE_PATHS` は grant では変わりません。渡せるのは「どこで作業するか」と「何を参照してよいか」だけです。
 - `delegate_tasks` でもサブタスクごとに同じ2つを指定できます（案件フォルダ別に並列で走らせられます）。
 - タスクが終われば効力も終わります。1タスク＝1エージェントなので、他のタスクには漏れません。
 
-**渡せる範囲**（2段階で検査します）:
+**渡せる範囲**（同じ検査を、権限種別ごとに2回行います）:
 
-1. **渡す側** … 自分が書き込めるパス（自分のワークスペース＋自分の `LITTLE_AGENT_WRITABLE_PATHS`）しか渡せません。委譲を経由して自分の権限を広げることはできません。読むだけのパスも渡せません。
-2. **受け取る側** … 受け取ったパスを、サーバ自身のワークスペースと書き込み可能パス（起動時の `--writable-path` を含む）に照らして検査し、外れていれば `-32602 InvalidParams` で断ります。grantを一切受け付けない設定のサーバも同じくエラーを返します。
+| 渡すもの | 渡す側・受け取る側とも、この範囲に収まっていること |
+| --- | --- |
+| `workspace` | 自分の**書き込み可能**な範囲（ワークスペース＋`LITTLE_AGENT_WRITABLE_PATHS`） |
+| `allowed_paths` | 自分の**読み取り可能**な範囲（上記＋`LITTLE_AGENT_READABLE_PATHS`） |
 
-渡す側の検査に落ちたサブタスクは**送信前に**失敗し、受け取る側に断られたサブタスクも**相手が作業を始める前に**失敗します。どちらも理由（どのパスが、どの許可範囲から外れたか）がそのままToolの結果に返ります。
+1. **渡す側** … 上の表に収まらないものは渡せません。委譲を経由して自分の権限を広げることはできません。読むだけのパスは参照用としては渡せますが、作業場所にはできません。
+2. **受け取る側** … 受け取ったパスを、サーバ自身の設定（起動時の `--writable-path` / `--readable-path` を含む）に照らして同じように検査し、外れていれば `-32602 InvalidParams` で断ります。grantを一切受け付けない設定のサーバも同じくエラーを返します。
+
+渡す側の検査に落ちたサブタスクは**送信前に**失敗し、受け取る側に断られたサブタスクも**相手が作業を始める前に**失敗します。どちらも理由（どのパスが、読み取り／書き込みどちらの許可範囲から外れたか）がそのままToolの結果に返ります。
 
 ローカルプロファイルへの委譲では、自動起動する子サーバに親と同じワークスペースと許可パスを引き継ぐので、親が到達できる場所はそのまま渡せます。手動で起動するサーバは次のように許可範囲を決めます。
 
 ```powershell
-# 共有ドライブを渡せるようにして公開する
-little-agent serve-a2a --agent office --port 8801 --writable-path D:\shared
+# 案件フォルダを作業場所として渡せるようにする（読み書き）
+little-agent serve-a2a --agent office --port 8801 --writable-path D:\projects
+# 共有ドライブは参照だけ渡せるようにする（読み取り専用）
+little-agent serve-a2a --agent office --port 8801 --readable-path D:\shared
 # 信頼できる自分専用サーバなら、検査自体を外すこともできる（既定はオフ）
 python -m little_agent.a2a.serve --port 8801 --allow-any-path
 ```
@@ -480,8 +495,8 @@ Core Tool の `delegate_task`（1件）と `delegate_tasks`（複数を並列）
 | `agent` | 任意。ローカルのプロファイル名、または設定済みリモートピア名。省略すると `default` |
 | `agent_url` | 任意。A2Aエージェントのベースを直接指定（例 `http://127.0.0.1:8801/`）。`agent` より優先 |
 | `background` | 任意。作業前に渡す前提・素材 |
-| `workspace` | 任意。相手がこのタスクでワークスペースとして使うディレクトリ |
-| `allowed_paths` | 任意。そのワークスペース外で相手が読み書きしてよいファイル・ディレクトリの配列 |
+| `workspace` | 任意。相手がこのタスクで作業する（読み書きする）ディレクトリ |
+| `allowed_paths` | 任意。そのワークスペース外で相手が**読んで**よい参照ファイル・ディレクトリの配列 |
 
 `delegate_tasks` は同じ形のオブジェクトの配列を取り、それぞれを独立したA2Aタスクとして同時に走らせます。
 
@@ -587,7 +602,7 @@ python -m pytest -q
 | `tests/test_memory.py` | MemoryStore（File/Null）、ChatSessionの会話継続、auto-learning |
 | `tests/test_launch.py` | 起動モードの引数解釈と、各モードが選ぶMemoryStore |
 | `tests/test_skills.py` | 同梱Skillの読み込み、Skill Tool実行、Skill追加、core非依存の検証 |
-| `tests/test_grant.py` | workspace / allowed_paths の表現と2段階の認可 |
+| `tests/test_grant.py` | workspace / allowed_paths の表現と、読み書き権限ごとの2段階認可 |
 | `tests/test_a2a.py` | A2Aサーバ/クライアント実HTTP、TextPart/DataPart、cancel、Task非共有、workspace受け渡し、委譲・並列委譲 |
 | `tests/test_schema.py` | 内蔵JSON Schemaバリデータ |
 | `tests/test_agents.py` | Agent Profile（Skill/Tool/委譲の制限、profile解決） |
