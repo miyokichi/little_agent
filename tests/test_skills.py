@@ -1,6 +1,7 @@
 """The bundled skill library: loading it, and running what it registers.
 
-Skills ship in ``skills/`` and reach the runtime only through the loader, so
+Skills ship inside the package (``little_agent/builtin_skills/``) and reach the
+runtime only through the loader, so
 these tests treat the library as data: every folder must load, every manifest
 must produce working tools, and a new skill must need nothing but a folder.
 """
@@ -8,15 +9,24 @@ must produce working tools, and a new skill must need nothing but a folder.
 from __future__ import annotations
 
 import json
+import os
 import re
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
+import little_agent
+from little_agent.config import (
+    AgentConfig,
+    builtin_skills_dir,
+    describe_skill_library,
+    resolve_skill_library,
+)
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools.base import ToolContext
 
-LIBRARY = Path("skills").resolve()
+LIBRARY = builtin_skills_dir()
 
 
 class BundledLibraryTests(unittest.TestCase):
@@ -120,6 +130,136 @@ class SkillToolExecutionTests(unittest.TestCase):
             listed = self.tools["list_projects"].run(ctx)
             self.assertTrue(listed.ok, listed.content)
             self.assertIn("Q3 report", listed.content)
+
+
+class SkillLibraryResolutionTests(unittest.TestCase):
+    """Skills are a runtime resource, resolved independently of the workspace.
+
+    Order: an explicit LITTLE_AGENT_SKILL_LIBRARY_DIR, then <workspace>/skills
+    when it exists, then the library shipped inside the package.
+    """
+
+    def test_builtin_library_ships_inside_the_package(self) -> None:
+        builtin = builtin_skills_dir()
+        self.assertTrue(builtin.is_dir(), builtin)
+        # It lives under the package, which is what makes pip carry it.
+        package_root = Path(little_agent.__file__).resolve().parent
+        self.assertEqual(builtin.parent, package_root)
+        self.assertGreater(len(list(builtin.glob("*/SKILL.md"))), 5)
+
+    def test_an_external_workspace_still_gets_the_builtin_skills(self) -> None:
+        """The regression this ordering exists for: skills must not vanish."""
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "my-project"
+            workspace.mkdir()
+            self.assertEqual(resolve_skill_library(None, workspace), builtin_skills_dir())
+            skills = SkillLoader(resolve_skill_library(None, workspace)).load_all()
+            self.assertGreater(len(skills), 5)
+
+    def test_a_workspace_library_takes_precedence_when_present(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            (workspace / "skills" / "local_only").mkdir(parents=True)
+            (workspace / "skills" / "local_only" / "SKILL.md").write_text(
+                "# local_only\n\n## Description\nWorkspace-specific.\n", encoding="utf-8"
+            )
+            resolved = resolve_skill_library(None, workspace)
+            self.assertEqual(resolved, workspace / "skills")
+            self.assertEqual([s.name for s in SkillLoader(resolved).load_all()], ["local_only"])
+
+    def test_an_explicit_setting_wins_over_both(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            # A workspace library exists, and would win if nothing were set.
+            (workspace / "skills" / "ignored").mkdir(parents=True)
+            (workspace / "skills" / "ignored" / "SKILL.md").write_text(
+                "# ignored\n\n## Description\nx\n", encoding="utf-8"
+            )
+            chosen = workspace / "elsewhere"
+            (chosen / "chosen_skill").mkdir(parents=True)
+            (chosen / "chosen_skill" / "SKILL.md").write_text(
+                "# chosen_skill\n\n## Description\nx\n", encoding="utf-8"
+            )
+            resolved = resolve_skill_library(str(chosen), workspace)
+            self.assertEqual(resolved, chosen)
+            self.assertEqual([s.name for s in SkillLoader(resolved).load_all()], ["chosen_skill"])
+
+    def test_an_explicit_relative_setting_resolves_from_the_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            self.assertEqual(
+                resolve_skill_library("my-skills", workspace), workspace / "my-skills"
+            )
+
+    def test_an_explicit_setting_is_honoured_even_when_missing(self) -> None:
+        """A typo must surface as an empty library, not fall back silently."""
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            (workspace / "skills").mkdir()
+            resolved = resolve_skill_library(str(workspace / "typo"), workspace)
+            self.assertEqual(resolved, workspace / "typo")
+            self.assertNotEqual(resolved, builtin_skills_dir())
+
+    def test_blank_setting_is_treated_as_unset(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            self.assertEqual(resolve_skill_library("   ", workspace), builtin_skills_dir())
+
+    def test_config_from_env_uses_the_builtin_library_for_an_external_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "project"
+            workspace.mkdir()
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("LITTLE_AGENT_")
+            }
+            env["LITTLE_AGENT_WORKSPACE"] = str(workspace)
+            with mock.patch.dict(os.environ, env, clear=True):
+                config = AgentConfig.from_env()
+            self.assertEqual(config.skill_library_dir, builtin_skills_dir())
+            self.assertIn("built-in", describe_skill_library(config))
+
+
+class EmptyLibraryWarningTests(unittest.TestCase):
+    """An agent with no skills must say so rather than start quietly."""
+
+    def test_a_missing_library_warns_and_names_where_it_looked(self) -> None:
+        with TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "not-there"
+            warning = SkillLoader(missing).warning()
+            self.assertIsNotNone(warning)
+            self.assertIn("no skills were loaded", warning)
+            self.assertIn(str(missing), warning)
+            self.assertIn("do not exist", warning)
+            self.assertIn("LITTLE_AGENT_SKILL_LIBRARY_DIR", warning)
+
+    def test_an_empty_but_existing_library_warns(self) -> None:
+        with TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "skills"
+            empty.mkdir()
+            warning = SkillLoader(empty).warning()
+            self.assertIsNotNone(warning)
+            self.assertNotIn("do not exist", warning)
+
+    def test_a_populated_library_does_not_warn(self) -> None:
+        self.assertIsNone(SkillLoader(builtin_skills_dir()).warning())
+
+    def test_a_profile_asking_for_no_skills_is_not_warned_about(self) -> None:
+        """Declaring "skills": [] is a choice, not a misconfiguration."""
+
+        self.assertIsNone(SkillLoader(builtin_skills_dir(), names=set()).warning())
+
+    def test_a_profile_whose_named_skills_are_missing_is_warned_about(self) -> None:
+        with TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "skills"
+            empty.mkdir()
+            warning = SkillLoader(empty, names={"datetime", "excel_file"}).warning()
+            self.assertIsNotNone(warning)
+            self.assertIn("datetime", warning)
+            self.assertIn("excel_file", warning)
 
 
 class NewSkillTests(unittest.TestCase):

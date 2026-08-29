@@ -23,7 +23,7 @@ from typing import Any
 from little_agent import agents
 from little_agent.a2a import serve as a2a_serve
 from little_agent.commands import CommandContext, CommandRegistry
-from little_agent.config import AgentConfig
+from little_agent.config import AgentConfig, describe_skill_library
 from little_agent.control import StopController
 from little_agent.factory import build_agent
 from little_agent.memory.store import FileMemoryStore, MemoryStore, NullMemoryStore
@@ -122,9 +122,13 @@ def chat(args: argparse.Namespace) -> None:
     mode = "OpenAI" if config.openai_api_key else "local fallback"
     print(f"Little Agent ({mode})")
     print(f"Workspace: {config.workspace}")
+    print(f"Skills: {describe_skill_library(config)}")
     print(f"Active agent: {ctx.active_agent}")
     print(f"Memory: {memory.describe()}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
+    warning = agent.skills.warning()
+    if warning:
+        print(warning)
     print("Type /help for commands, /exit to quit.\n")
 
     _repl(ctx)

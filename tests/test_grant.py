@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from little_agent.config import builtin_skills_dir
 from little_agent.a2a.grant import (
     ALLOWED_PATHS_METADATA_KEY,
     WORKSPACE_METADATA_KEY,
@@ -21,7 +22,7 @@ from little_agent.a2a.grant import (
 from little_agent.config import AgentConfig
 from little_agent.tools.base import PathAccessPolicy
 
-LIBRARY = Path("skills").resolve()
+LIBRARY = builtin_skills_dir()
 
 
 def _config(workspace: Path, writable: tuple[Path, ...] = (), readable: tuple[Path, ...] = ()):

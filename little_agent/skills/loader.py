@@ -25,6 +25,11 @@ class SkillLoader:
     def load_all(self) -> list[Skill]:
         return [self._load(path) for path in self._skill_files("SKILL.md")]
 
+    def warning(self) -> str | None:
+        """Why this loader found nothing, or ``None`` when it found skills."""
+
+        return library_warning(self.roots, self.load_all(), self.names)
+
     def select_for_text(self, text: str, limit: int = 3) -> list[Skill]:
         skills = self.load_all()
         scored = [(self._score(skill, text), skill) for skill in skills]
@@ -126,3 +131,28 @@ class SkillLoader:
         if skill.name.lower() in text.lower():
             score += 3
         return score
+
+
+def library_warning(roots: list[Path], skills: list[Skill], names: set[str] | None) -> str | None:
+    """A warning for a library that produced no skills, or ``None`` when fine.
+
+    An agent with no skills still runs — it just has none of the knowledge the
+    library carries — so this is a warning rather than a failure. A profile that
+    deliberately declares ``"skills": []`` is not warned about: it asked for
+    nothing and got nothing.
+    """
+
+    if skills or names == set():
+        return None
+    searched = ", ".join(str(root) for root in roots) or "(nowhere)"
+    missing = [str(root) for root in roots if not root.is_dir()]
+    lines = [f"Warning: no skills were loaded. Searched: {searched}"]
+    if missing:
+        lines.append(f"  These directories do not exist: {', '.join(missing)}")
+    if names:
+        lines.append(f"  The agent profile asked for: {', '.join(sorted(names))}")
+    lines.append(
+        "  Skills are resolved as LITTLE_AGENT_SKILL_LIBRARY_DIR, then "
+        "<workspace>/skills, then the built-in library."
+    )
+    return "\n".join(lines)

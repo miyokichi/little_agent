@@ -28,7 +28,7 @@ from little_agent.a2a.grant import GrantPolicy, WorkGrant
 from little_agent.a2a.models import agent_card, agent_skill
 from little_agent.a2a.server import DEFAULT_PORT, A2AService, serve
 from little_agent.agents import AgentProfile
-from little_agent.config import AgentConfig
+from little_agent.config import AgentConfig, describe_skill_library
 from little_agent.factory import build_agent
 from little_agent.skills.loader import SkillLoader
 
@@ -177,6 +177,12 @@ def run(args: argparse.Namespace) -> None:
     print(f"Auth: {'bearer token required' if token else 'none'}")
     print(f"Confirmation-required tools: {'auto-approved' if auto_approve else 'denied'}")
     print(f"Workspace: {config.workspace}")
+    print(f"Skills: {describe_skill_library(config)}")
+    warning = SkillLoader(
+        [root.resolve() for root in profile.skill_roots()], names=profile.skill_names()
+    ).warning()
+    if warning:
+        print(warning)
     if allow_any_path:
         print("Grantable as a workspace (read+write): any (unrestricted)")
         print("Grantable as an allowed path (read):   any (unrestricted)")

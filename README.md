@@ -24,7 +24,7 @@ Runtime は**1本**で、その上に **Chat**（人と対話する）と **A2A*
 | **A2A** | `little_agent/a2a/` | Agent Card・JSON-RPC・Task・workspace grant |
 | **Memory** | `little_agent/memory/` | 永続memoryの抽象。Runtimeとは疎結合 |
 | **Workspace** | `little_agent/tools/base.py`, `paths.py`, `a2a/grant.py` | 読み書きできる範囲の決定と検証 |
-| **Skills** | `little_agent/skills/`（loader）, `skills/`（実装） | Skill定義とSkill Tool。coreから分離 |
+| **Skills** | `little_agent/skills/`（loader）, `little_agent/builtin_skills/`（実装） | Skill定義とSkill Tool。coreから分離 |
 
 Runtime 自身は実行の間に何も持ち越しません。会話を続けたい側（Chat）が履歴を保持して渡し、独立させたい側（A2A）は何も渡しません。
 
@@ -212,29 +212,52 @@ memory ONのchatではこれに `update_workspace_memory` / `update_global_memor
 
 ## Skills
 
-Skillは **`skills/` にフォルダを置くだけ**で使えます。Skill実装とCore Runtimeは分離されており、Skill Loader だけが両者をつなぎます。
+Skillは **`little_agent/builtin_skills/` に同梱**され、pipでコードと一緒にインストールされます。Skillは**workspaceのデータではなくRuntimeの資源**なので、作業ディレクトリをどこに向けてもSkillが消えることはありません。
+
+Skill実装とCore Runtimeは分離されており、Skill Loader だけが両者をつなぎます。
 
 ```text
 little_agent/
 ├─ agent.py
 ├─ ...
-└─ skills/            # Skillの読み込み機構（core側）
-   ├─ loader.py
-   ├─ models.py
-   └─ script_tool.py
-
-skills/               # Skillの実装（データ側）
-├─ file_manager/
-├─ python_coder/
-├─ windows_operator/
-├─ excel_file/
-├─ ppt_file/
-└─ ...
+├─ skills/               # Skillの読み込み機構（core側）
+│  ├─ loader.py
+│  ├─ models.py
+│  └─ script_tool.py
+│
+└─ builtin_skills/       # 同梱Skillの実装（データ側／パッケージに同梱）
+   ├─ file_manager/
+   ├─ python_coder/
+   ├─ windows_operator/
+   ├─ excel_file/
+   ├─ ppt_file/
+   └─ ...
 ```
 
 - Core Runtime に個別Skillの依存を足すことはしません。Skillスクリプトも `little_agent` を import しません（依存は一方向）。
-- 新しいSkillの追加は `skills/` にフォルダを足すだけで、coreの変更も登録作業も不要です。
-- 外部リポジトリ化やgit submodule化はしていません。Skillはこのリポジトリに同梱されます。
+- 新しいSkillの追加はフォルダを足すだけで、coreの変更も登録作業も不要です。
+- 外部リポジトリ化やgit submodule化はしていません。
+
+### Skillライブラリの探索順序
+
+```text
+1. LITTLE_AGENT_SKILL_LIBRARY_DIR   … 明示指定。最優先
+2. <workspace>/skills               … そのディレクトリが存在する場合
+3. little_agent/builtin_skills/     … 同梱のBuiltin Skills
+```
+
+- **1** は存在しないパスを指していても採用します（typoが黙って無視されず、空ライブラリとして表面化するため）。相対パスはworkspace基準です。
+- **2** はプロジェクト固有のSkillライブラリを持ちたいときに使います。存在しなければ次へ進みます。
+- **3** が既定です。`LITTLE_AGENT_WORKSPACE` を別ディレクトリに向けても、Builtin Skillsはそのまま使えます。
+
+起動時にどこから読んだかを表示します。
+
+```text
+Skills: C:\Users\me\...\little_agent\builtin_skills (built-in)
+Skills: D:\my-project\skills (workspace)
+```
+
+**Skillが0件のときは黙って起動しません。** 探した場所・存在しなかったディレクトリ・プロファイルが要求したSkill名を挙げて警告します（`"skills": []` と明示したプロファイルは意図的な選択なので警告しません）。
 
 ### SKILL.md
 
@@ -315,14 +338,14 @@ skills/<skill_name>/
 
 Officeファイル系は外部ライブラリなしでOffice Open XMLを扱います（`.xls` / `.ppt` は非対応、読み取りと簡易新規作成が中心）。`screen_capture` は `mss` + `Pillow`、`computer_use` は `pyautogui` が必要です。`project_manager` のビューアは `skills/project_manager/scripts/viewer.py` としてSkillフォルダ内に同梱されています（coreには入っていません）。
 
-`workspace_harness` は `tasks/`（`LITTLE_AGENT_TASKS_DIR`）と `shared/`（`LITTLE_AGENT_SHARED_DIR`）を使います。リポジトリにサンプルが入っています。
+`workspace_harness` は `tasks/`（`LITTLE_AGENT_TASKS_DIR`）と `shared/`（`LITTLE_AGENT_SHARED_DIR`）を使います。リポジトリにサンプルが入っています。これらはworkspace側に作られ、無ければ自動生成されます。
 
 ## Agent Profile
 
 Agent Profile は「**そのエージェントが何のSkillとToolを使えるか**」を定義する能力contractです。Runtime側は profile を読むだけで、書き換えません。
 
 ```text
-skills/                     # ライブラリ: 全スキルのマスター
+little_agent/builtin_skills/ # ライブラリ: 同梱スキルのマスター
 agents/                     # 各エージェント（.gitignore 対象。運用側のデータ）
   observer/
     agent.json
@@ -347,7 +370,7 @@ agents/                     # 各エージェント（.gitignore 対象。運用
 }
 ```
 
-- `skills` … ライブラリ（`skills/`）から名前で選ぶ。省略した場合は `agents/<name>/skills/` に置いたフォルダがそのまま有効になります。両方ある場合はエージェント自身のフォルダが優先されます。
+- `skills` … ライブラリ（上の探索順序で決まる場所）から名前で選ぶ。省略した場合は `agents/<name>/skills/` に置いたフォルダがそのまま有効になります。両方ある場合はエージェント自身のフォルダが優先されます。
 - `core_tools` … Core Toolの許可リスト。省略で全Core Tool有効。`delegate_task` / `delegate_tasks` もこのリストで制御できるので、**委譲機能はRuntimeに常に存在し、使わせるかはProfileが決める**構成になります。
 - `description` と有効なSkillは、A2A Agent Card の説明・`skills` としてそのまま公開されます。
 
@@ -601,7 +624,7 @@ python -m pytest -q
 | `tests/test_core.py` | Agent loop、multi-step tool loop、実行の独立性、Structured Output |
 | `tests/test_memory.py` | MemoryStore（File/Null）、ChatSessionの会話継続、auto-learning |
 | `tests/test_launch.py` | 起動モードの引数解釈と、各モードが選ぶMemoryStore |
-| `tests/test_skills.py` | 同梱Skillの読み込み、Skill Tool実行、Skill追加、core非依存の検証 |
+| `tests/test_skills.py` | 同梱Skillの読み込み、Skill Tool実行、Skill追加、ライブラリ探索順序、0件時の警告、core非依存の検証 |
 | `tests/test_grant.py` | workspace / allowed_paths の表現と、読み書き権限ごとの2段階認可 |
 | `tests/test_a2a.py` | A2Aサーバ/クライアント実HTTP、TextPart/DataPart、cancel、Task非共有、workspace受け渡し、委譲・並列委譲 |
 | `tests/test_schema.py` | 内蔵JSON Schemaバリデータ |
@@ -613,7 +636,7 @@ python -m pytest -q
 
 **Toolを追加する**: `little_agent/tools` にToolクラスを追加し、`name` / `description` / `parameters` / `requires_confirmation` / `run()` を実装して、`little_agent/tools/__init__.py` の `default_tools()` に登録します。
 
-**Skillを追加する**: `skills/<new_skill>/SKILL.md` を作り、必要なら `tools.json` と `scripts/` を足します。coreの変更は不要です。
+**Skillを追加する**: Skillライブラリに `<new_skill>/SKILL.md` を作り、必要なら `tools.json` と `scripts/` を足します。coreの変更は不要です。自分のプロジェクトだけで使うなら `<workspace>/skills/` に、同梱として配りたいなら `little_agent/builtin_skills/` に置きます。
 
 **Memoryの保存先を変える**: `little_agent/memory/store.py` の `MemoryStore` プロトコル（`sections` / `tools` / `learn` / `describe`）を満たすクラスを作り、`build_agent(..., memory=...)` に渡します。Runtime側の変更は要りません。
 

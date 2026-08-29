@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from little_agent.config import builtin_skills_dir
 from little_agent.agent import Agent
 from little_agent.commands import (
     CommandContext,
@@ -39,7 +40,7 @@ def _context(registry: CommandRegistry, workspace: Path) -> tuple[CommandContext
         openai_base_url="https://api.openai.com/v1",
         enable_logging=False,
     )
-    agent = Agent(config, SkillLoader(Path("skills").resolve()))
+    agent = Agent(config, SkillLoader(builtin_skills_dir()))
     return CommandContext(session=ChatSession(agent), registry=registry), agent
 
 
@@ -181,10 +182,10 @@ class AgentCommandTests(unittest.TestCase):
             openai_api_key=None,
             openai_base_url="https://api.openai.com/v1",
             enable_logging=False,
-            skill_library_dir=Path("skills").resolve(),
+            skill_library_dir=builtin_skills_dir(),
             agents_dir=(root / "agents").resolve(),
         )
-        agent = Agent(config, SkillLoader(Path("skills").resolve()))
+        agent = Agent(config, SkillLoader(builtin_skills_dir()))
         return CommandContext(
             session=ChatSession(agent), registry=registry, active_agent=active
         )

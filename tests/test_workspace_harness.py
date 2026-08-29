@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path("skills/workspace_harness/scripts/harness_tool.py").resolve()
+from little_agent.config import builtin_skills_dir
+
+SCRIPT = builtin_skills_dir() / "workspace_harness" / "scripts" / "harness_tool.py"
 
 
 def call(tool: str, workspace: Path, arguments: dict) -> dict:
@@ -93,14 +95,14 @@ class SkillToolNameUniquenessTests(unittest.TestCase):
 
         from little_agent.skills.loader import SkillLoader
 
-        names = [tool.name for tool in SkillLoader(Path("skills").resolve()).load_tools()]
+        names = [tool.name for tool in SkillLoader(builtin_skills_dir()).load_tools()]
         duplicates = [name for name, count in Counter(names).items() if count > 1]
         self.assertEqual(duplicates, [], f"Duplicate skill tool names: {duplicates}")
 
     def test_workspace_harness_is_loaded(self) -> None:
         from little_agent.skills.loader import SkillLoader
 
-        skills = {s.name for s in SkillLoader(Path("skills").resolve()).load_all()}
+        skills = {s.name for s in SkillLoader(builtin_skills_dir()).load_all()}
         self.assertIn("workspace_harness", skills)
 
 

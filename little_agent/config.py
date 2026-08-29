@@ -23,6 +23,45 @@ def _path_list(value: str | None) -> tuple[Path, ...]:
     return tuple(Path(item.strip()).resolve() for item in value.split(os.pathsep) if item.strip())
 
 
+def builtin_skills_dir() -> Path:
+    """The skill library shipped inside the installed package.
+
+    Skills are a runtime resource, not workspace data: they live under
+    ``little_agent/builtin_skills/`` and are installed by pip along with the
+    code, so pointing the agent at some other directory to work in never costs
+    it its skills.
+    """
+
+    return (Path(__file__).resolve().parent / "builtin_skills").resolve()
+
+
+def resolve_skill_library(raw: str | None, workspace: Path) -> Path:
+    """Where to load skills from, most specific source first.
+
+    1. ``LITTLE_AGENT_SKILL_LIBRARY_DIR`` when set — an explicit choice always
+       wins, and is honoured even if it does not exist yet (so a typo surfaces
+       as an empty library rather than being silently ignored).
+    2. ``<workspace>/skills`` when that directory exists — a project may carry
+       its own library.
+    3. The built-in library shipped with the package.
+    """
+
+    if raw and raw.strip():
+        path = Path(raw.strip()).expanduser()
+        return (path if path.is_absolute() else workspace / path).resolve()
+    workspace_library = (workspace / "skills").resolve()
+    if workspace_library.is_dir():
+        return workspace_library
+    return builtin_skills_dir()
+
+
+def describe_skill_library(config: "AgentConfig") -> str:
+    """Where the skills came from, so an unexpected library is visible at a glance."""
+
+    origin = "built-in" if config.skill_library_dir == builtin_skills_dir() else "workspace"
+    return f"{config.skill_library_dir} ({origin})"
+
+
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     model: str
@@ -38,7 +77,7 @@ class AgentConfig:
     llm_timeout_seconds: int = 60
     commands_dir: Path = field(default_factory=lambda: (Path.cwd() / "commands").resolve())
     global_commands_dir: Path = field(default_factory=lambda: Path.home() / ".little_agent" / "commands")
-    skill_library_dir: Path = field(default_factory=lambda: (Path.cwd() / "skills").resolve())
+    skill_library_dir: Path = field(default_factory=builtin_skills_dir)
     agents_dir: Path = field(default_factory=lambda: (Path.cwd() / "agents").resolve())
     active_agent: str | None = None
     stop_hotkey: str = "<ctrl>+<alt>+q"
@@ -68,9 +107,9 @@ class AgentConfig:
         commands_dir = commands_dir.resolve()
         raw_global_commands = os.getenv("LITTLE_AGENT_GLOBAL_COMMANDS_DIR")
         global_commands_dir = Path(raw_global_commands).resolve() if raw_global_commands else Path.home() / ".little_agent" / "commands"
-        configured_library_dir = Path(os.getenv("LITTLE_AGENT_SKILL_LIBRARY_DIR", "skills"))
-        skill_library_dir = configured_library_dir if configured_library_dir.is_absolute() else workspace / configured_library_dir
-        skill_library_dir = skill_library_dir.resolve()
+        skill_library_dir = resolve_skill_library(
+            os.getenv("LITTLE_AGENT_SKILL_LIBRARY_DIR"), workspace
+        )
         configured_agents_dir = Path(os.getenv("LITTLE_AGENT_AGENTS_DIR", "agents"))
         agents_dir = configured_agents_dir if configured_agents_dir.is_absolute() else workspace / configured_agents_dir
         agents_dir = agents_dir.resolve()

@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from little_agent import agents
+from little_agent.config import builtin_skills_dir
 from little_agent.a2a import serve as a2a_serve
 from little_agent.cli import build_memory_store, build_parser
 from little_agent.config import AgentConfig
@@ -22,7 +23,7 @@ from little_agent.control import StopController
 from little_agent.factory import build_agent
 from little_agent.memory.store import FileMemoryStore, NullMemoryStore
 
-LIBRARY = Path("skills").resolve()
+LIBRARY = builtin_skills_dir()
 
 
 def _config(workspace: Path) -> AgentConfig:

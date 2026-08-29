@@ -18,6 +18,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from little_agent import agents
+from little_agent.config import builtin_skills_dir
 from little_agent.a2a import models
 from little_agent.agent import RunResult
 from little_agent.a2a.client import A2AClient, A2AClientError, fetch_agent_card
@@ -30,7 +31,7 @@ from little_agent.control import StopController
 from little_agent.tools.base import ToolContext
 from little_agent.tools.delegation import DelegateTasksTool, DelegateTaskTool
 
-LIBRARY = Path("skills").resolve()
+LIBRARY = builtin_skills_dir()
 
 
 def write_profile(agents_dir: Path, name: str, **profile) -> None:

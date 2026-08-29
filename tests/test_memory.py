@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from little_agent.config import builtin_skills_dir
 from little_agent.agent import Agent
 from little_agent.config import AgentConfig
 from little_agent.memory.store import FileMemoryStore, MemoryFile, NullMemoryStore
@@ -19,7 +20,7 @@ from little_agent.messages import Message, text_content
 from little_agent.session import ChatSession
 from little_agent.skills.loader import SkillLoader
 
-LIBRARY = Path("skills").resolve()
+LIBRARY = builtin_skills_dir()
 
 
 class RecordingClient:
