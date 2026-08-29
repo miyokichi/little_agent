@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,10 @@ def run(args: argparse.Namespace) -> None:
         print(f"Grantable as an allowed path (read):   {readable or '(workspace only)'}")
     print("Memory: off (each task is independent; nothing is persisted)")
     print("Ctrl+C to stop.")
+    # A server's stdout is usually a pipe, and a pipe is block-buffered: without
+    # this the banner (and any skill-library warning above it) would sit unseen
+    # in the buffer for the life of the process.
+    sys.stdout.flush()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

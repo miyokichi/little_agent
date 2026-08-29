@@ -255,7 +255,10 @@ little_agent/
 ```text
 Skills: C:\Users\me\...\little_agent\builtin_skills (built-in)
 Skills: D:\my-project\skills (workspace)
+Skills: D:\shared\skill-library (configured)
 ```
+
+括弧内は探索順序のどの段が採用されたかで、設定が効いているかを一目で確認できます。
 
 **Skillが0件のときは黙って起動しません。** 探した場所・存在しなかったディレクトリ・プロファイルが要求したSkill名を挙げて警告します（`"skills": []` と明示したプロファイルは意図的な選択なので警告しません）。
 

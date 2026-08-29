@@ -56,9 +56,18 @@ def resolve_skill_library(raw: str | None, workspace: Path) -> Path:
 
 
 def describe_skill_library(config: "AgentConfig") -> str:
-    """Where the skills came from, so an unexpected library is visible at a glance."""
+    """Where the skills came from, so an unexpected library is visible at a glance.
 
-    origin = "built-in" if config.skill_library_dir == builtin_skills_dir() else "workspace"
+    The label names which rung of the resolution order won, which is what tells
+    an operator whether their setting took effect.
+    """
+
+    if config.skill_library_dir == builtin_skills_dir():
+        origin = "built-in"
+    elif config.skill_library_dir == (config.workspace / "skills").resolve():
+        origin = "workspace"
+    else:
+        origin = "configured"
     return f"{config.skill_library_dir} ({origin})"
 
 

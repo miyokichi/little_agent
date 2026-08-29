@@ -222,6 +222,36 @@ class SkillLibraryResolutionTests(unittest.TestCase):
             self.assertEqual(config.skill_library_dir, builtin_skills_dir())
             self.assertIn("built-in", describe_skill_library(config))
 
+    def test_describe_names_which_rung_of_the_order_won(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            (workspace / "skills").mkdir()
+            base = dict(
+                model="local",
+                workspace=workspace,
+                require_confirmation=False,
+                openai_api_key=None,
+                openai_base_url="https://api.openai.com/v1",
+                enable_logging=False,
+                agents_dir=workspace / "agents",
+            )
+            self.assertIn(
+                "(built-in)",
+                describe_skill_library(AgentConfig(**base, skill_library_dir=builtin_skills_dir())),
+            )
+            self.assertIn(
+                "(workspace)",
+                describe_skill_library(
+                    AgentConfig(**base, skill_library_dir=workspace / "skills")
+                ),
+            )
+            self.assertIn(
+                "(configured)",
+                describe_skill_library(
+                    AgentConfig(**base, skill_library_dir=workspace / "elsewhere")
+                ),
+            )
+
 
 class EmptyLibraryWarningTests(unittest.TestCase):
     """An agent with no skills must say so rather than start quietly."""
