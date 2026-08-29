@@ -6,16 +6,14 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-data/tasks.json*
-data/workflows.json*
-data/projects.json*
 .test-*.json
 .test-*/
 logs/
 agents/
 
-# Runtime memory/profile artifacts (workspace-level)
+*.png
+
+# Runtime state written by the agent and its skills, not source.
+data/
 memory.md
 profile.md
-
-*.png

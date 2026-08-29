@@ -1,6 +1,15 @@
+"""Running a skill's script as a tool.
+
+The contract is deliberately thin so a skill folder stays copy-portable: the
+script is handed one JSON object on stdin and answers with one JSON object on
+stdout. Both sides are pinned to UTF-8 — a skill that prints Japanese (or any
+non-ASCII) must not depend on the machine's console codepage.
+"""
+
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -23,14 +32,23 @@ class ScriptSkillTool:
         payload = {
             "tool": self.name,
             "workspace": str(context.workspace),
+            "readable_paths": [str(path) for path in context.readable_paths],
+            "writable_paths": [str(path) for path in context.writable_paths],
             "arguments": kwargs,
         }
+        # PYTHONIOENCODING pins the child's own stdout/stderr; ``encoding`` pins
+        # this side's decoding. Without both, a non-ASCII result dies on a
+        # console codepage that cannot represent it (cp932, cp1252, ...).
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         completed = subprocess.run(
             [sys.executable, str(self.script_path), self.name],
             cwd=self.script_path.parent.parent,
             input=json.dumps(payload),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
             timeout=self.timeout_seconds,
             check=False,
         )
@@ -53,4 +71,3 @@ class ScriptSkillTool:
             content=str(data.get("content", "")),
             images=images,
         )
-

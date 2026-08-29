@@ -1,21 +1,73 @@
+"""The agent runtime: one execution of the tool loop, start to finish.
+
+This is the single runtime both front ends share::
+
+                 Agent Runtime
+                 /           \
+              Chat            A2A
+
+``Agent.run`` is one independent execution. It builds its messages from the
+instruction, the caller-supplied context, any conversation ``history`` handed in
+for this run, the profile's skills and tools, runs the multi-step tool loop and
+returns the result. The agent itself keeps nothing between runs — whoever wants
+continuity owns it and passes it back in (that is
+:class:`~little_agent.session.ChatSession` for chat; an A2A task passes nothing,
+so tasks never share context).
+
+Persistence is likewise not the runtime's business: it holds a
+:class:`~little_agent.memory.store.MemoryStore` and asks it for prompt sections
+and tools. With the null store — ``chat --no-memory`` and every A2A task — that
+is nothing at all, and no file is read or written.
+"""
+
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
+from little_agent import schema as json_schema
 from little_agent.config import AgentConfig
 from little_agent.control import StopController
 from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
 from little_agent.logging import RunLogger, estimate_tokens
-from little_agent.memory import ConversationMemory, MasterMemory
+from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.messages import Message, text_content
-from little_agent.reflection import Reflector
 from little_agent.skills.loader import SkillLoader
-from little_agent.tools import UpdateGlobalMemoryTool, UpdateWorkspaceMemoryTool, default_tools
+from little_agent.tools import default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
 
 
 ConfirmCallback = Callable[[str, dict[str, Any]], bool]
+
+
+class StructuredOutputError(RuntimeError):
+    """The final answer did not parse as JSON, or did not match ``output_schema``."""
+
+
+@dataclass(slots=True)
+class RunResult:
+    """The outcome of one execution.
+
+    ``text`` is always set (it is what a human or a text-only caller reads).
+    ``data`` holds the validated JSON value when the caller asked for structured
+    output with an ``output_schema``, and is ``None`` otherwise.
+    """
+
+    text: str
+    data: Any | None = None
+
+    def __str__(self) -> str:
+        return self.text
+
+
+@dataclass(slots=True)
+class _Execution:
+    """Per-run state. Created in ``run`` and discarded when it returns."""
+
+    messages: list[Message] = field(default_factory=list)
+    approved: bool = False
 
 
 class Agent:
@@ -28,93 +80,80 @@ class Agent:
         confirm: ConfirmCallback | None = None,
         stop: StopController | None = None,
         core_tools: set[str] | None = None,
+        memory: MemoryStore | None = None,
     ) -> None:
         self.config = config
         self.skills = skills
+        # No store means "remember nothing" — never a silent fallback to disk.
+        self.memory: MemoryStore = memory or NullMemoryStore()
         # ``core_tools`` is a per-agent allowlist for the built-in core tools.
-        # Skill script tools and memory tools below are always registered.
+        # Skill script tools are always registered.
         self.tools = tools or default_tools(core_tools)
         for tool in self.skills.load_tools():
             if tool.name not in self.tools.names():
                 self.tools.register(tool)
+        # Memory tools exist only when the store persists something.
+        for tool in self.memory.tools():
+            self.tools.register(tool)
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
         self.stop = stop or StopController(config.stop_hotkey)
-        # Once the user approves a confirmation, the rest of the session runs
-        # without further prompts (session-wide approval).
-        self._session_approved = False
-        self.memory = ConversationMemory()
-        self.workspace_memory = MasterMemory(config.workspace / "memory.md")
-        self.global_memory = MasterMemory(config.global_memory_path)
-        self.tools.register(UpdateWorkspaceMemoryTool(self.workspace_memory))
-        self.tools.register(UpdateGlobalMemoryTool(self.global_memory))
-        # Auto-learning: durable profiles distilled from the session (separate
-        # from the manually-edited memory.md above).
-        self.workspace_profile = MasterMemory(config.workspace / "profile.md")
-        self.global_profile = MasterMemory(config.global_profile_path)
-        self._reflected_upto = 0
         self.logger = RunLogger(config.log_dir or (config.workspace / "logs")) if config.enable_logging else None
 
-    def end_session(self) -> bool:
-        """Distill durable profiles from the session. Call once when the session ends."""
-        return self._reflect()
+    def run(
+        self,
+        instruction: str,
+        context: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        history: Sequence[Message] | None = None,
+    ) -> RunResult:
+        """Execute one task and return its result.
 
-    def remember(self) -> bool:
-        """Manually trigger auto-learning mid-session (e.g. the /remember command)."""
-        return self._reflect()
+        ``context`` is situational data supplied by the caller for this execution
+        only; it is rendered into the prompt and never persisted. When
+        ``output_schema`` is given the final answer must be JSON matching it, and
+        ``StructuredOutputError`` is raised when it is not.
 
-    def _reflect(self) -> bool:
-        if not self.config.enable_auto_learning:
-            return False
-        # LocalRuleClient cannot summarize; skip auto-learning without a real LLM.
-        if isinstance(self.llm, LocalRuleClient):
-            return False
-        if len(self.memory.messages) <= self._reflected_upto:
-            return False  # nothing new since the last reflection
-        reflector = Reflector(self.llm, self.config.model)
-        result = reflector.reflect(
-            self.memory.messages,
-            self.global_profile.load(),
-            self.workspace_profile.load(),
+        ``history`` is earlier conversation the caller wants this run to see. The
+        agent copies it, never mutates it, and keeps nothing afterwards: a caller
+        that wants continuity (chat) owns the transcript and hands it back each
+        turn, and a caller that wants isolation (an A2A task) simply passes
+        nothing.
+        """
+
+        prompt = self._compose_prompt(instruction, context)
+        if self.logger:
+            self.logger.log_conversation("user_message", content=prompt)
+
+        execution = _Execution()
+        selected_skills = self.skills.select_for_text(prompt)
+        execution.messages.append(
+            self._system_prompt(selected_skills, output_schema, conversational=bool(history))
         )
-        # Mark progress even on no-op so we don't retry the same transcript.
-        self._reflected_upto = len(self.memory.messages)
-        if result is None:
-            return False
-        new_global, new_workspace = result
-        # An empty string means "leave the existing profile untouched".
-        if new_global:
-            self.global_profile.save(new_global)
-        if new_workspace:
-            self.workspace_profile.save(new_workspace)
-        if self.logger:
-            self.logger.log_conversation(
-                "auto_learning",
-                global_updated=bool(new_global),
-                workspace_updated=bool(new_workspace),
-            )
-        return bool(new_global or new_workspace)
+        # A system message inside the caller's history would fight the one above.
+        execution.messages.extend(
+            message for message in (history or ()) if message.role != "system"
+        )
+        execution.messages.append(Message(role="user", content=prompt))
 
-    def run(self, user_text: str) -> str:
+        final = self._loop(execution)
         if self.logger:
-            self.logger.log_conversation("user_message", content=user_text)
-        selected_skills = self.skills.select_for_text(user_text)
-        system_prompt = self._system_prompt(selected_skills)
-        messages = [*self.memory.messages]
-        if not messages or messages[0].role != "system":
-            messages.insert(0, system_prompt)
-        else:
-            messages[0] = system_prompt
-        messages.append(type(system_prompt)(role="user", content=user_text))
+            self.logger.log_conversation("final_answer", content=final)
+        if output_schema is None:
+            return RunResult(final)
+        return self._structured_result(final, output_schema)
 
+    def _loop(self, execution: _Execution) -> str:
+        """Run the multi-step tool loop and return the final assistant text."""
+
+        messages = execution.messages
         final = ""
         self.stop.reset()
         self.stop.arm()
         try:
-            for _step in range(max(self.config.max_tool_steps, 1)):
+            for step in range(max(self.config.max_tool_steps, 1)):
                 if self.stop.triggered:
-                    final = self._stop_message()
-                    break
+                    return self._stop_message()
                 try:
                     response = self.llm.complete(self.config.model, messages, self.tools)
                 except RuntimeError as exc:
@@ -129,13 +168,13 @@ class Agent:
                         "assistant_message",
                         content=content,
                         tool_calls=tool_calls,
-                        step=_step + 1,
+                        step=step + 1,
                     )
                     self.logger.log_usage(
                         "llm_usage",
                         self._usage(response, messages, content, tool_calls),
                         model=self.config.model,
-                        step=_step + 1,
+                        step=step + 1,
                     )
                 if not tool_calls:
                     final = content
@@ -147,7 +186,7 @@ class Agent:
                 for call in tool_calls:
                     if stopped or self.stop.triggered:
                         # Fill remaining tool calls with a stop result so the
-                        # conversation stays well-formed for the next turn.
+                        # conversation stays well-formed.
                         stopped = True
                         if self.logger:
                             self.logger.log_tool(
@@ -161,7 +200,7 @@ class Agent:
                             )
                         )
                         continue
-                    output, images = self._run_tool(call["name"], call.get("arguments", {}))
+                    output, images = self._run_tool(execution, call["name"], call.get("arguments", {}))
                     messages.append(
                         Message(
                             role="tool",
@@ -171,8 +210,7 @@ class Agent:
                     )
                     pending_images.extend((call["name"], uri) for uri in images)
                 if stopped:
-                    final = self._stop_message()
-                    break
+                    return self._stop_message()
                 # Tool messages cannot carry images in the OpenAI chat format, so image
                 # outputs are forwarded in a follow-up user message after all tool replies.
                 if pending_images:
@@ -185,15 +223,111 @@ class Agent:
                 final = f"Stopped after {self.config.max_tool_steps} tool step(s)."
         finally:
             self.stop.disarm()
+        return final or "(no response)"
 
-        if not final:
-            final = "(no response)"
+    # --- structured output ---------------------------------------------------
 
-        self.memory.add("user", user_text)
-        self.memory.add("assistant", final)
+    def _structured_result(self, final: str, output_schema: dict[str, Any]) -> RunResult:
+        parsed = _parse_json(final)
+        if parsed is _INVALID:
+            raise StructuredOutputError(
+                "The agent's final answer was not valid JSON, but an output_schema was "
+                f"requested. Answer: {final[:500]}"
+            )
+        errors = json_schema.validate(parsed, output_schema)
+        if errors:
+            raise StructuredOutputError(
+                "The agent's final answer did not match output_schema: " + "; ".join(errors[:10])
+            )
+        return RunResult(json.dumps(parsed, ensure_ascii=False), data=parsed)
+
+    # --- prompt assembly -----------------------------------------------------
+
+    @staticmethod
+    def _compose_prompt(instruction: str, context: dict[str, Any] | None) -> str:
+        instruction = (instruction or "").strip()
+        if not context:
+            return instruction
+        rendered = json.dumps(context, ensure_ascii=False, indent=2, default=str)
+        return f"{instruction}\n\n## Context (JSON, provided for this task only)\n{rendered}"
+
+    def _system_prompt(
+        self,
+        selected_skills: list[Any],
+        output_schema: dict[str, Any] | None = None,
+        conversational: bool = False,
+    ) -> Message:
+        skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
+        opening = (
+            "You are Little Agent. You are in a conversation: earlier turns are above, "
+            "so resolve references against them."
+            if conversational
+            else "You are Little Agent, a task runner. You are given one task, with "
+            "everything you need to do it."
+        )
+        content = (
+            f"{opening} Use tools when they help. Keep actions "
+            "inside the configured workspace and explicitly allowed paths. "
+            "Prefer concise, practical answers.\n\n"
+            f"Workspace: {self.config.workspace}\n\n"
+            f"Readable paths: {_paths_text(self.config.readable_paths)}\n"
+            f"Writable paths: {_paths_text(self.config.writable_paths)}\n\n"
+            f"Available tools:\n{self.tools.descriptions()}\n\n"
+            f"Relevant skills:\n{skill_text}"
+        )
+        # Empty for the null store, so this whole block vanishes without memory.
+        for heading, body in self.memory.sections():
+            content += f"\n\n## {heading}\n{body}"
+        if output_schema is not None:
+            content += (
+                "\n\n## Required output format\n"
+                "Your FINAL message must be a single JSON value that validates against this "
+                "JSON Schema. Output the JSON only: no prose, no explanation, no code fences.\n"
+                + json.dumps(output_schema, ensure_ascii=False)
+            )
+        return Message(role="system", content=content)
+
+    # --- tools ---------------------------------------------------------------
+
+    def _run_tool(
+        self, execution: _Execution, name: str, arguments: dict[str, Any]
+    ) -> tuple[str, tuple[str, ...]]:
+        if name not in self.tools.names():
+            if self.logger:
+                self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
+            return f"Unknown tool: {name}", ()
+        tool = self.tools.get(name)
+        if self.config.require_confirmation and tool.requires_confirmation and not execution.approved:
+            if not self.confirm(name, arguments):
+                if self.logger:
+                    self.logger.log_tool("tool_cancelled", tool=name, arguments=arguments)
+                return "Cancelled by user.", ()
+            # Approval covers the rest of this execution only.
+            execution.approved = True
+        context = ToolContext(
+            workspace=self.config.workspace,
+            readable_paths=self.config.readable_paths,
+            writable_paths=self.config.writable_paths,
+            require_confirmation=self.config.require_confirmation,
+        )
+        try:
+            result = tool.run(context, **arguments)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the model as tool failure text.
+            if self.logger:
+                self.logger.log_tool("tool_error", tool=name, arguments=arguments, error=str(exc))
+            return f"Tool failed: {exc}", ()
+        prefix = "OK" if result.ok else "ERROR"
+        output = f"{prefix}: {result.content}"
         if self.logger:
-            self.logger.log_conversation("final_answer", content=final)
-        return final
+            self.logger.log_tool(
+                "tool_result",
+                tool=name,
+                arguments=arguments,
+                ok=result.ok,
+                content=result.content,
+                images=len(result.images),
+            )
+        return output, result.images
 
     @staticmethod
     def _normalize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -211,42 +345,6 @@ class Agent:
 
     def _stop_message(self) -> str:
         return f"Stopped by user (hotkey {self.stop.hotkey})."
-
-    def _run_tool(self, name: str, arguments: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
-        if name not in self.tools.names():
-            if self.logger:
-                self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
-            return f"Unknown tool: {name}", ()
-        tool = self.tools.get(name)
-        if self.config.require_confirmation and tool.requires_confirmation and not self._session_approved:
-            if not self.confirm(name, arguments):
-                if self.logger:
-                    self.logger.log_tool("tool_cancelled", tool=name, arguments=arguments)
-                return "Cancelled by user.", ()
-            # Session-wide approval: don't prompt again for the rest of the session.
-            self._session_approved = True
-        context = ToolContext(
-            workspace=self.config.workspace,
-            require_confirmation=self.config.require_confirmation,
-        )
-        try:
-            result = tool.run(context, **arguments)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the CLI as tool failure text.
-            if self.logger:
-                self.logger.log_tool("tool_error", tool=name, arguments=arguments, error=str(exc))
-            return f"Tool failed: {exc}", ()
-        prefix = "OK" if result.ok else "ERROR"
-        output = f"{prefix}: {result.content}"
-        if self.logger:
-            self.logger.log_tool(
-                "tool_result",
-                tool=name,
-                arguments=arguments,
-                ok=result.ok,
-                content=result.content,
-                images=len(result.images),
-            )
-        return output, result.images
 
     @staticmethod
     def _usage(
@@ -278,34 +376,6 @@ class Agent:
             "estimated": True,
         }
 
-    def _system_prompt(self, selected_skills: list[Any]):
-        skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
-
-        global_mem = self.global_memory.load()
-        workspace_mem = self.workspace_memory.load()
-        global_prof = self.global_profile.load()
-        workspace_prof = self.workspace_profile.load()
-        memory_section = ""
-        if global_mem:
-            memory_section += f"\n\n## Global Memory\n{global_mem}"
-        if workspace_mem:
-            memory_section += f"\n\n## Workspace Memory\n{workspace_mem}"
-        if global_prof:
-            memory_section += f"\n\n## User Profile (learned)\n{global_prof}"
-        if workspace_prof:
-            memory_section += f"\n\n## Workspace Profile (learned)\n{workspace_prof}"
-
-        content = (
-            "You are Little Agent, a Windows-friendly Python agent system. "
-            "Use tools when they help. Keep actions inside the configured workspace. "
-            "Prefer concise, practical answers.\n\n"
-            f"Workspace: {self.config.workspace}\n\n"
-            f"Available tools:\n{self.tools.descriptions()}\n\n"
-            f"Relevant skills:\n{skill_text}"
-            f"{memory_section}"
-        )
-        return Message(role="system", content=content)
-
     @staticmethod
     def _default_llm(config: AgentConfig) -> LLMClient:
         if config.openai_api_key:
@@ -315,3 +385,34 @@ class Agent:
                 timeout=config.llm_timeout_seconds,
             )
         return LocalRuleClient()
+
+
+# Sentinel distinguishing "parsed to JSON null" from "did not parse".
+_INVALID = object()
+
+
+def _paths_text(paths: tuple[Any, ...]) -> str:
+    return ", ".join(str(path) for path in paths) if paths else "(none)"
+
+
+def _parse_json(raw: str) -> Any:
+    """Strict JSON parse of a final answer, tolerating a fenced code block.
+
+    Deliberately strict otherwise: a malformed answer must be rejected rather
+    than repaired, so a caller asking for structured output never receives a
+    guess about what the model meant.
+    """
+
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        body = text[3:]
+        if body.lower().startswith("json"):
+            body = body[4:]
+        end = body.rfind("```")
+        text = (body[:end] if end != -1 else body).strip()
+    if not text:
+        return _INVALID
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return _INVALID

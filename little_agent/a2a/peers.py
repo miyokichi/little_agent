@@ -152,6 +152,8 @@ class PeerPool:
 
         env = os.environ.copy()
         env["LITTLE_AGENT_WORKSPACE"] = str(self._config.workspace)
+        env["LITTLE_AGENT_READABLE_PATHS"] = _join_paths(self._config.readable_paths)
+        env["LITTLE_AGENT_WRITABLE_PATHS"] = _join_paths(self._config.writable_paths)
         env["LITTLE_AGENT_AGENTS_DIR"] = str(self._config.agents_dir)
         env["LITTLE_AGENT_SKILL_LIBRARY_DIR"] = str(self._config.skill_library_dir)
         package_root = Path(little_agent.__file__).resolve().parent.parent
@@ -215,6 +217,10 @@ class PeerPool:
 
 def _env_flag(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _join_paths(paths: tuple[Path, ...]) -> str:
+    return os.pathsep.join(str(path) for path in paths)
 
 
 _shared_lock = threading.Lock()

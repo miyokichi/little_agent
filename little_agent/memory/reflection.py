@@ -1,3 +1,12 @@
+"""Distil a finished session into durable profiles.
+
+The reflector is the *learning* half of :mod:`little_agent.memory`: it reads a
+session transcript plus the profiles that already exist and asks the model for
+merged replacements. Only a store that actually persists something drives it
+(:class:`~little_agent.memory.store.FileMemoryStore`); the null store never does,
+so a ``--no-memory`` chat and every A2A task learn nothing.
+"""
+
 from __future__ import annotations
 
 import json

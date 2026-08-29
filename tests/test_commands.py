@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from little_agent import agents
 from little_agent.agent import Agent
 from little_agent.commands import (
     CommandContext,
@@ -14,7 +14,16 @@ from little_agent.commands import (
     render_template,
 )
 from little_agent.config import AgentConfig
+from little_agent.session import ChatSession
 from little_agent.skills.loader import SkillLoader
+
+
+def write_profile(agents_dir: Path, name: str, **profile) -> None:
+    directory = agents_dir / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "agent.json").write_text(
+        json.dumps({"name": name, **profile}), encoding="utf-8"
+    )
 
 
 def _make_registry(project: Path, global_dir: Path) -> CommandRegistry:
@@ -31,7 +40,7 @@ def _context(registry: CommandRegistry, workspace: Path) -> tuple[CommandContext
         enable_logging=False,
     )
     agent = Agent(config, SkillLoader(Path("skills").resolve()))
-    return CommandContext(agent=agent, registry=registry), agent
+    return CommandContext(session=ChatSession(agent), registry=registry), agent
 
 
 class RenderTemplateTests(unittest.TestCase):
@@ -109,17 +118,6 @@ class DispatchTests(unittest.TestCase):
             self.assertTrue(registry.dispatch(ctx, "/exit").should_exit)
             self.assertTrue(registry.dispatch(ctx, "/quit").should_exit)
 
-    def test_clear_empties_conversation_memory(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            registry = _make_registry(root / "commands", root / "global")
-            ctx, agent = _context(registry, root)
-            agent.memory.add("user", "one")
-            agent.memory.add("assistant", "two")
-            result = registry.dispatch(ctx, "/clear")
-            self.assertEqual(agent.memory.messages, [])
-            self.assertIn("cleared", result.output.lower())
-
     def test_help_lists_builtin_and_custom(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -129,7 +127,7 @@ class DispatchTests(unittest.TestCase):
             registry = _make_registry(commands, root / "global")
             ctx, _ = _context(registry, root)
             output = registry.dispatch(ctx, "/help").output
-            self.assertIn("/clear", output)
+            self.assertIn("/skills", output)
             self.assertIn("/review", output)
             self.assertIn("review a file", output)
 
@@ -187,7 +185,9 @@ class AgentCommandTests(unittest.TestCase):
             agents_dir=(root / "agents").resolve(),
         )
         agent = Agent(config, SkillLoader(Path("skills").resolve()))
-        return CommandContext(agent=agent, registry=registry, active_agent=active)
+        return CommandContext(
+            session=ChatSession(agent), registry=registry, active_agent=active
+        )
 
     def test_agents_lists_builtin_default_when_empty(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -201,7 +201,7 @@ class AgentCommandTests(unittest.TestCase):
     def test_agents_lists_created_with_active_marker(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            agents.create_agent(root / "agents", Path("skills").resolve(), "office", skills=["datetime"])
+            write_profile(root / "agents", "office", skills=["datetime"])
             registry = _make_registry(root / "commands", root / "global")
             ctx = self._ctx(registry, root, active="office")
             output = registry.dispatch(ctx, "/agents").output

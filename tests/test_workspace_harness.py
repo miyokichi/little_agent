@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -9,12 +10,20 @@ SCRIPT = Path("skills/workspace_harness/scripts/harness_tool.py").resolve()
 
 
 def call(tool: str, workspace: Path, arguments: dict) -> dict:
+    """Invoke the skill script the way ScriptSkillTool does.
+
+    The UTF-8 pinning matters: this skill answers in Japanese, which a console
+    codepage such as cp932 cannot always encode.
+    """
+
     payload = {"tool": tool, "workspace": str(workspace), "arguments": arguments}
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), tool],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         check=True,
     )
     return json.loads(completed.stdout.strip())

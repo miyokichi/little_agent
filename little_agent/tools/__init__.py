@@ -9,7 +9,6 @@ from little_agent.tools.filesystem import (
     SearchFilesTool,
     WriteFileTool,
 )
-from little_agent.tools.memory_tool import UpdateGlobalMemoryTool, UpdateWorkspaceMemoryTool
 from little_agent.tools.shell import RunPowerShellTool
 from little_agent.tools.web import FetchUrlTool
 
@@ -19,7 +18,7 @@ def default_tools(enabled: set[str] | None = None) -> ToolRegistry:
 
     ``enabled`` is an optional allowlist of tool names; when given, only core
     tools whose name is in the set are registered. ``None`` registers all of
-    them (the default, so existing callers are unchanged).
+    them (the default).
     """
 
     registry = ToolRegistry()
@@ -50,7 +49,5 @@ __all__ = [
     "ToolContext",
     "ToolRegistry",
     "ToolResult",
-    "UpdateGlobalMemoryTool",
-    "UpdateWorkspaceMemoryTool",
     "default_tools",
 ]

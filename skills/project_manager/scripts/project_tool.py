@@ -21,6 +21,10 @@ RESULT_MAX_CHARS = 2000
 COMMENT_MAX_CHARS = 2000
 DEFAULT_VIEWER_PORT = 8765
 INBOX_TITLE = "Inbox"
+# The viewer ships inside this skill folder rather than in the little_agent
+# package, so the skill carries its own dependency and the core runtime carries
+# none of the skill's.
+VIEWER_SCRIPT = Path(__file__).resolve().parent / "viewer.py"
 
 
 def main() -> int:
@@ -380,7 +384,7 @@ def open_project_viewer(workspace: Path, arguments: dict[str, Any]) -> dict[str,
         else:
             popen_kwargs["start_new_session"] = True
         subprocess.Popen(
-            [sys.executable, "-m", "little_agent.viewer", "--workspace", str(workspace), "--port", str(port)],
+            [sys.executable, str(VIEWER_SCRIPT), "--workspace", str(workspace), "--port", str(port)],
             **popen_kwargs,
         )
         for _attempt in range(6):
@@ -392,7 +396,7 @@ def open_project_viewer(workspace: Path, arguments: dict[str, Any]) -> dict[str,
                 "ok": False,
                 "content": (
                     f"Viewer did not start on port {port}. "
-                    f"Try manually: python -m little_agent.viewer --workspace \"{workspace}\""
+                    f"Try manually: python \"{VIEWER_SCRIPT}\" --workspace \"{workspace}\""
                 ),
             }
     webbrowser.open(url + fragment)
@@ -663,7 +667,7 @@ def _format_task(task: dict[str, Any], ready_ids: set[str]) -> str:
     return " ".join(parts)
 
 
-# NOTE: keep the storage/migration helpers below in sync with little_agent/viewer.py.
+# NOTE: keep the storage/migration helpers below in sync with scripts/viewer.py.
 # The duplication is intentional: skill scripts must not import little_agent so that
 # skill folders stay copy-portable.
 def _projects_path(workspace: Path) -> Path:
