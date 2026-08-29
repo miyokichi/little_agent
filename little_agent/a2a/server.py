@@ -11,6 +11,11 @@ Each task runs in its own worker thread with a **freshly built agent**, and an
 agent run keeps nothing after it returns, so tasks never share context.
 ``tasks/cancel`` trips that task's stop controller, which aborts the agent
 between tool calls — the same mechanism as the interactive emergency-stop hotkey.
+
+A caller may also ask, in the message metadata, for a specific workspace and for
+paths outside it (see :mod:`little_agent.a2a.grant`). That is a request: it is
+authorized against this server's own configuration, and refused with ``-32602``
+when it reaches somewhere the server may not.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
+from little_agent.a2a.grant import GrantError, GrantPolicy, WorkGrant
 from little_agent.a2a.models import (
     AGENT_CARD_PATH,
     CONTENT_TYPE_NOT_SUPPORTED,
@@ -30,6 +36,7 @@ from little_agent.a2a.models import (
     LEGACY_AGENT_CARD_PATH,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
+    PUSH_NOTIFICATION_NOT_SUPPORTED,
     TASK_CANCELED,
     TASK_COMPLETED,
     TASK_FAILED,
@@ -57,8 +64,9 @@ DEFAULT_GRACE_SECONDS = 2.0
 DEFAULT_PORT = 8800
 
 # Builds an agent for a task. Receives the delegation depth requested by the
-# caller and a stop controller wired to this task's cancellation.
-AgentFactory = Callable[[int, Any], Any]
+# caller, a stop controller wired to this task's cancellation, and the authorized
+# work grant saying where this task may work.
+AgentFactory = Callable[[int, Any, WorkGrant], Any]
 
 
 class TaskStore:
@@ -138,12 +146,17 @@ class A2AService:
         agent_factory: AgentFactory,
         token: str | None = None,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
+        grant_policy: GrantPolicy | None = None,
     ) -> None:
         self.card = card
         self.tasks = TaskStore()
         self._agent_factory = agent_factory
         self._token = token
         self._grace = grace_seconds
+        # Without a policy this server hands out nothing: a caller asking for a
+        # workspace or extra paths is refused, and every task runs in the
+        # server's own workspace.
+        self._grant_policy = grant_policy
 
     def handle(self, payload: Any) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
@@ -167,11 +180,12 @@ class A2AService:
                     UNSUPPORTED_OPERATION,
                     "This agent does not support streaming; use message/send and poll tasks/get.",
                 )
-            if method in {
-                "tasks/pushNotificationConfig/set",
-                "tasks/pushNotificationConfig/get",
-            }:
-                raise A2AError(UNSUPPORTED_OPERATION, "Push notifications are not supported.")
+            if isinstance(method, str) and method.startswith("tasks/pushNotificationConfig/"):
+                # The dedicated code lets a peer tell "push isn't offered here"
+                # apart from "I don't know that method".
+                raise A2AError(
+                    PUSH_NOTIFICATION_NOT_SUPPORTED, "Push notifications are not supported."
+                )
             raise A2AError(METHOD_NOT_FOUND, f"Unknown method: {method}")
         except A2AError as exc:
             return rpc_error(request_id, exc)
@@ -195,6 +209,7 @@ class A2AService:
             depth = int(metadata.get(DEPTH_METADATA_KEY, 0))
         except (TypeError, ValueError):
             depth = 0
+        grant = self._authorize(WorkGrant.from_metadata(metadata))
 
         task_id = new_id()
         context_id = str(message.get("contextId") or new_id())
@@ -207,7 +222,7 @@ class A2AService:
 
         worker = threading.Thread(
             target=self._run_task,
-            args=(task_id, payload, depth, stop),
+            args=(task_id, payload, depth, stop, grant),
             name=f"a2a-task-{task_id[:8]}",
             daemon=True,
         )
@@ -219,11 +234,32 @@ class A2AService:
         assert result is not None
         return result
 
+    def _authorize(self, grant: WorkGrant) -> WorkGrant:
+        """Vet the caller's requested workspace and paths against this server's own."""
+
+        if grant.is_empty:
+            return grant
+        if self._grant_policy is None:
+            raise A2AError(
+                INVALID_PARAMS,
+                "This agent does not accept a workspace or path grant; "
+                "it works only in its own configured workspace.",
+            )
+        try:
+            return self._grant_policy.authorize(grant)
+        except GrantError as exc:
+            raise A2AError(INVALID_PARAMS, str(exc)) from exc
+
     def _run_task(
-        self, task_id: str, payload: RequestPayload, depth: int, stop: "_CancelFlag"
+        self,
+        task_id: str,
+        payload: RequestPayload,
+        depth: int,
+        stop: "_CancelFlag",
+        grant: WorkGrant,
     ) -> None:
         try:
-            agent = self._agent_factory(depth, stop)
+            agent = self._agent_factory(depth, stop, grant)
             result = agent.run(
                 payload.instruction,
                 context=payload.context or None,

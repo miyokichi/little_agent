@@ -13,6 +13,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
+from little_agent.a2a.grant import WorkGrant
 from little_agent.a2a.models import (
     AGENT_CARD_PATH,
     DEPTH_METADATA_KEY,
@@ -104,12 +105,21 @@ class A2AClient:
         return response["result"]
 
     def send_message(
-        self, text: str = "", depth: int | None = None, data: Any = None
+        self,
+        text: str = "",
+        depth: int | None = None,
+        data: Any = None,
+        grant: WorkGrant | None = None,
     ) -> dict[str, Any]:
         """Send one message. ``data`` is sent as an A2A DataPart alongside the text."""
 
-        metadata = {DEPTH_METADATA_KEY: depth} if depth is not None else None
-        message = new_message("user", text, data=data, metadata=metadata)
+        metadata: dict[str, Any] = {}
+        if depth is not None:
+            metadata[DEPTH_METADATA_KEY] = depth
+        if grant is not None and not grant.is_empty:
+            # Where the peer should work: its workspace and any granted paths.
+            metadata.update(grant.to_metadata())
+        message = new_message("user", text, data=data, metadata=metadata or None)
         result = self.call("message/send", {"message": message})
         if not isinstance(result, dict):
             raise A2AClientError("message/send did not return a Task or Message.")
@@ -135,6 +145,7 @@ class A2AClient:
         poll_interval: float = POLL_INTERVAL,
         should_stop: Callable[[], bool] | None = None,
         data: Any = None,
+        grant: WorkGrant | None = None,
     ) -> dict[str, Any]:
         """Send a message and poll until the task reaches a terminal state.
 
@@ -147,12 +158,16 @@ class A2AClient:
         ``should_stop`` is polled between attempts so a caller (the emergency-stop
         hotkey, or a cancelled parent task) can abandon the wait; the peer's task
         is cancelled rather than left running.
+
+        ``grant`` optionally asks the peer to work in a particular workspace and
+        to reach given paths outside it. The peer authorizes it against its own
+        configuration and refuses anything it may not touch.
         """
 
         if should_stop is not None and should_stop():
             raise A2AClientError("Stopped before the task was sent.")
 
-        result = self.send_message(text, depth=depth, data=data)
+        result = self.send_message(text, depth=depth, data=data, grant=grant)
         if result.get("kind") == "message":
             return result
 

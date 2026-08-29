@@ -6,6 +6,12 @@ Two tools share one code path:
 - ``delegate_tasks`` — fan several independent subtasks out **concurrently**
   (each its own A2A task, optionally on different peers) and collect them.
 
+A subtask can also say *where* it happens: ``workspace`` is the directory the
+peer treats as its workspace for that task and ``allowed_paths`` lists files and
+directories outside it the peer may read and write. Both are checked against what
+this agent can write before they are sent, and again by the peer on arrival (see
+:mod:`little_agent.a2a.grant`).
+
 Both are A2A **clients**: discover the peer's Agent Card, send ``message/send``,
 poll ``tasks/get`` to a terminal state, and return the artifact text. The peer
 can be any A2A-compliant agent reachable by URL, or a local ``agents/`` profile
@@ -20,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from little_agent.a2a.client import A2AClientError
+from little_agent.a2a.grant import GrantError, GrantPolicy, WorkGrant
 from little_agent.a2a.models import TASK_COMPLETED, task_result_text
 from little_agent.a2a.peers import PeerPool, shared_pool
 from little_agent.config import AgentConfig
@@ -40,6 +47,14 @@ _AGENT_URL_DESCRIPTION = (
     "Overrides 'agent'. Use for peers not in the configured list."
 )
 _BACKGROUND_DESCRIPTION = "Optional background or source material to send before the task."
+_WORKSPACE_DESCRIPTION = (
+    "Optional directory the peer should treat as its workspace for this subtask. "
+    "Relative to your own workspace, or an absolute path you can already reach."
+)
+_ALLOWED_PATHS_DESCRIPTION = (
+    "Optional files or directories OUTSIDE that workspace the peer may read and write. "
+    "You can only hand over paths you can write yourself, and the peer checks them again."
+)
 
 
 @dataclass(slots=True)
@@ -67,6 +82,9 @@ class _DelegationRunner:
         self._pool = pool
         self._stop = stop
         self._timeout = timeout
+        # What this agent may hand on: only what it can write itself, so a
+        # delegation can never widen its own reach.
+        self._policy = GrantPolicy.from_config(config)
 
     @property
     def depth_exceeded(self) -> bool:
@@ -98,6 +116,19 @@ class _DelegationRunner:
             return _Outcome(label, False, "task is required.")
 
         try:
+            grant = self._policy.authorize(
+                WorkGrant.request(
+                    self._config.workspace,
+                    workspace=spec.get("workspace"),
+                    allowed_paths=spec.get("allowed_paths"),
+                )
+            )
+        except GrantError as exc:
+            # Refused before anything is sent: the peer never sees a path this
+            # agent had no business handing over.
+            return _Outcome(label, False, f"Cannot hand over that work directory: {exc}")
+
+        try:
             client = self._pool.connect(name=agent_name, url=agent_url)
         except FileNotFoundError:
             available = ", ".join(self.peers()) or "(none)"
@@ -121,6 +152,7 @@ class _DelegationRunner:
                 depth=self._depth + 1,
                 timeout=self._timeout,
                 should_stop=self._should_stop,
+                grant=grant,
             )
         except A2AClientError as exc:
             return _Outcome(label, False, f"A2A task failed: {exc}")
@@ -158,6 +190,12 @@ class DelegateTaskTool:
             "agent": {"type": "string", "description": _AGENT_DESCRIPTION},
             "agent_url": {"type": "string", "description": _AGENT_URL_DESCRIPTION},
             "background": {"type": "string", "description": _BACKGROUND_DESCRIPTION},
+            "workspace": {"type": "string", "description": _WORKSPACE_DESCRIPTION},
+            "allowed_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": _ALLOWED_PATHS_DESCRIPTION,
+            },
         },
         "required": ["task"],
         "additionalProperties": False,
@@ -216,6 +254,15 @@ class DelegateTasksTool:
                         "background": {
                             "type": "string",
                             "description": _BACKGROUND_DESCRIPTION,
+                        },
+                        "workspace": {
+                            "type": "string",
+                            "description": _WORKSPACE_DESCRIPTION,
+                        },
+                        "allowed_paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": _ALLOWED_PATHS_DESCRIPTION,
                         },
                     },
                     "required": ["task"],

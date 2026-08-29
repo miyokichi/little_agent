@@ -4,22 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-
-def _resolve_existing_parent(path: Path) -> Path:
-    for parent in (path, *path.parents):
-        if parent.exists():
-            return parent.resolve()
-    return path.resolve()
-
-
-def _contains(root: Path, path: Path) -> bool:
-    return root == path or root in path.parents
-
-
-def _allowed_by(root: Path, path: Path) -> bool:
-    if root.exists() and not root.is_dir():
-        return root == path
-    return _contains(root, path)
+from little_agent.paths import is_within, resolve_existing_parent
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,12 +41,12 @@ class PathAccessPolicy:
 
         resolved = path.resolve()
         roots = self.readable_roots if access == "read" else self.writable_roots
-        if any(_allowed_by(root, resolved) for root in roots):
+        if any(is_within(root, resolved) for root in roots):
             return resolved
 
         if access == "write" and not path.exists():
-            parent = _resolve_existing_parent(path.parent)
-            if parent.is_dir() and any(_allowed_by(root, parent) for root in roots):
+            parent = resolve_existing_parent(path.parent)
+            if parent.is_dir() and any(is_within(root, parent) for root in roots):
                 return resolved
 
         raise ValueError(f"Path is outside allowed {access} paths: {requested_path}")
@@ -69,7 +54,7 @@ class PathAccessPolicy:
     def display(self, path: Path) -> str:
         resolved = path.resolve()
         for root in self.writable_roots + self.readable_roots:
-            if _allowed_by(root, resolved):
+            if is_within(root, resolved):
                 try:
                     return str(resolved.relative_to(root))
                 except ValueError:

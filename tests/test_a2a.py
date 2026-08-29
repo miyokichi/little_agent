@@ -21,6 +21,7 @@ from little_agent import agents
 from little_agent.a2a import models
 from little_agent.agent import RunResult
 from little_agent.a2a.client import A2AClient, A2AClientError, fetch_agent_card
+from little_agent.a2a.grant import GrantPolicy, WorkGrant
 from little_agent.a2a.peers import PeerPool, parse_peers
 from little_agent.a2a.server import A2AService, serve
 from little_agent.config import AgentConfig
@@ -58,6 +59,7 @@ class ScriptedAgent:
         self.contexts: list[dict | None] = []
         self.schemas: list[dict | None] = []
         self.depth: int | None = None
+        self.grant = None
 
     def run(self, instruction, context=None, output_schema=None) -> RunResult:
         self.prompts.append(instruction)
@@ -68,7 +70,12 @@ class ScriptedAgent:
         return RunResult(self.reply, data=self.data)
 
 
-def _config(workspace: Path, agents_dir: Path, max_depth: int = 2) -> AgentConfig:
+def _config(
+    workspace: Path,
+    agents_dir: Path,
+    max_depth: int = 2,
+    writable: tuple[Path, ...] = (),
+) -> AgentConfig:
     return AgentConfig(
         model="local",
         workspace=workspace.resolve(),
@@ -79,6 +86,7 @@ def _config(workspace: Path, agents_dir: Path, max_depth: int = 2) -> AgentConfi
         skill_library_dir=LIBRARY,
         agents_dir=agents_dir.resolve(),
         max_delegation_depth=max_depth,
+        writable_paths=tuple(path.resolve() for path in writable),
     )
 
 
@@ -96,17 +104,27 @@ def _card(port: int, name: str = "test-agent", requires_auth: bool = False) -> d
 class ServedAgent:
     """Context manager running an A2AService on a real loopback port."""
 
-    def __init__(self, agent, token: str | None = None, grace: float = 2.0) -> None:
+    def __init__(
+        self,
+        agent,
+        token: str | None = None,
+        grace: float = 2.0,
+        grant_policy: GrantPolicy | None = None,
+    ) -> None:
         self._agent = agent
         self._token = token
         self._grace = grace
+        self._grant_policy = grant_policy
         self.depths: list[int] = []
+        self.grants: list[WorkGrant] = []
 
     def __enter__(self) -> "ServedAgent":
-        def factory(depth, stop):
+        def factory(depth, stop, grant):
             self.depths.append(depth)
+            self.grants.append(grant)
             self._agent.depth = depth
             self._agent.stop = stop
+            self._agent.grant = grant
             return self._agent
 
         self.service = A2AService(
@@ -114,6 +132,7 @@ class ServedAgent:
             factory,
             token=self._token,
             grace_seconds=self._grace,
+            grant_policy=self._grant_policy,
         )
         # Bind port 0, then publish the real port in the card the client reads.
         self.httpd = serve(self.service, "127.0.0.1", 0)
@@ -619,6 +638,341 @@ class ParallelDelegationTests(unittest.TestCase):
             self.assertTrue(agent.stop.triggered)
 
 
+class TaskIsolationTests(unittest.TestCase):
+    """Successive A2A tasks must not see each other's conversation."""
+
+    def test_each_task_gets_its_own_agent_and_context(self) -> None:
+        built: list[object] = []
+
+        def factory(depth, stop, grant):
+            agent = ScriptedAgent(f"answer {len(built) + 1}")
+            built.append(agent)
+            return agent
+
+        service = A2AService(_card(0), factory, grace_seconds=2.0)
+        httpd = serve(service, "127.0.0.1", 0)
+        port = httpd.server_address[1]
+        service.card["url"] = f"http://127.0.0.1:{port}/"
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = A2AClient.connect(service.card["url"])
+            first = client.run_task("remember the number 42", timeout=10)
+            second = client.run_task("what number did I say?", timeout=10)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+        self.assertEqual(models.task_result_text(first), "answer 1")
+        self.assertEqual(models.task_result_text(second), "answer 2")
+        # Two separate agents, and neither saw the other's prompt.
+        self.assertEqual(len(built), 2)
+        self.assertEqual(built[0].prompts, ["remember the number 42"])
+        self.assertEqual(built[1].prompts, ["what number did I say?"])
+        self.assertNotEqual(first["contextId"], second["contextId"])
+
+    def test_a_real_served_agent_starts_from_a_clean_transcript(self) -> None:
+        """The runtime itself: two tasks through one profile share no history."""
+
+        seen: list[list[str]] = []
+
+        class Recorder:
+            def complete(self, model, messages, tools):
+                seen.append([message.role for message in messages])
+                return {"content": "done", "tool_calls": []}
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, root / "agents")
+            profile = agents.default_profile(config)
+
+            def factory(depth, stop, grant):
+                agent = build_agent(config, profile, lambda *_: True, stop, depth=depth)
+                agent.llm = Recorder()
+                return agent
+
+            service = A2AService(_card(0), factory, grace_seconds=5.0)
+            httpd = serve(service, "127.0.0.1", 0)
+            port = httpd.server_address[1]
+            service.card["url"] = f"http://127.0.0.1:{port}/"
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                client = A2AClient.connect(service.card["url"])
+                client.run_task("first", timeout=10)
+                client.run_task("second", timeout=10)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+        self.assertEqual(seen, [["system", "user"], ["system", "user"]])
+
+    def test_a_served_agent_persists_no_memory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, root / "agents")
+            agent = build_agent(
+                config, agents.default_profile(config), lambda *_: True, StopController("x")
+            )
+            self.assertFalse(agent.memory.enabled)
+            self.assertNotIn("update_workspace_memory", agent.tools.names())
+            self.assertNotIn("update_global_memory", agent.tools.names())
+
+
+class PushNotificationTests(unittest.TestCase):
+    """Push config gets its own error code, not the generic one."""
+
+    def _post(self, base_url: str, method: str) -> dict:
+        request = urllib.request.Request(
+            base_url,
+            data=json.dumps(
+                {"jsonrpc": "2.0", "id": 9, "method": method, "params": {}}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def test_every_push_config_method_reports_push_not_supported(self) -> None:
+        methods = (
+            "tasks/pushNotificationConfig/set",
+            "tasks/pushNotificationConfig/get",
+            "tasks/pushNotificationConfig/list",
+            "tasks/pushNotificationConfig/delete",
+        )
+        with ServedAgent(ScriptedAgent()) as served:
+            for method in methods:
+                body = self._post(served.base_url, method)
+                self.assertEqual(
+                    body["error"]["code"],
+                    models.PUSH_NOTIFICATION_NOT_SUPPORTED,
+                    f"unexpected error for {method}",
+                )
+
+    def test_card_declares_push_unsupported(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            card = fetch_agent_card(served.base_url)
+            self.assertFalse(card["capabilities"]["pushNotifications"])
+
+
+class WorkGrantOverA2ATests(unittest.TestCase):
+    """workspace / allowed_paths across the wire, and the server-side gate."""
+
+    def test_grant_reaches_the_server_and_builds_the_task_agent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            case = root / "case-7"
+            case.mkdir()
+            policy = GrantPolicy(roots=(root,))
+            with ServedAgent(ScriptedAgent(), grant_policy=policy) as served:
+                client = A2AClient.connect(served.base_url)
+                task = client.run_task(
+                    "do the work",
+                    timeout=10,
+                    grant=WorkGrant(workspace=case, allowed_paths=(root / "prices.xlsx",)),
+                )
+
+            self.assertEqual(task["status"]["state"], models.TASK_COMPLETED)
+            self.assertEqual(served.grants[0].workspace, case)
+            self.assertEqual(served.grants[0].allowed_paths, (root / "prices.xlsx",))
+
+    def test_a_server_without_a_policy_refuses_any_grant(self) -> None:
+        with TemporaryDirectory() as tmp:
+            with ServedAgent(ScriptedAgent()) as served:
+                client = A2AClient.connect(served.base_url)
+                with self.assertRaises(A2AClientError) as caught:
+                    client.run_task("do it", timeout=10, grant=WorkGrant(workspace=Path(tmp)))
+            self.assertIn(str(models.INVALID_PARAMS), str(caught.exception))
+
+    def test_a_server_refuses_a_path_it_cannot_reach(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
+            policy = GrantPolicy(roots=(Path(tmp).resolve(),))
+            with ServedAgent(ScriptedAgent(), grant_policy=policy) as served:
+                client = A2AClient.connect(served.base_url)
+                with self.assertRaises(A2AClientError) as caught:
+                    client.run_task(
+                        "do it", timeout=10, grant=WorkGrant(workspace=Path(outside).resolve())
+                    )
+            message = str(caught.exception)
+            self.assertIn(str(models.INVALID_PARAMS), message)
+            self.assertIn("outside the accessible paths", message)
+
+    def test_an_ungranted_task_runs_in_the_servers_own_workspace(self) -> None:
+        with ServedAgent(ScriptedAgent()) as served:
+            client = A2AClient.connect(served.base_url)
+            client.run_task("plain task", timeout=10)
+        self.assertTrue(served.grants[0].is_empty)
+
+    def test_a_served_agent_really_works_in_the_granted_directory(self) -> None:
+        """End to end: the grant decides where a relative write_file lands."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            home = root / "server-home"
+            case = root / "case-7"
+            home.mkdir()
+            case.mkdir()
+            config = _config(home, root / "agents")
+            profile = agents.default_profile(config)
+
+            class WritingClient:
+                """Calls write_file once, then answers."""
+
+                def __init__(self) -> None:
+                    self.done = False
+
+                def complete(self, model, messages, tools):
+                    if self.done:
+                        return {"content": "written", "tool_calls": []}
+                    self.done = True
+                    return {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "name": "write_file",
+                                "arguments": {"path": "report.txt", "content": "hello"},
+                            }
+                        ],
+                    }
+
+            def factory(depth, stop, grant):
+                agent = build_agent(
+                    grant.apply(config), profile, lambda *_: True, stop, depth=depth
+                )
+                agent.llm = WritingClient()
+                return agent
+
+            service = A2AService(
+                _card(0), factory, grace_seconds=5.0, grant_policy=GrantPolicy(roots=(root,))
+            )
+            httpd = serve(service, "127.0.0.1", 0)
+            port = httpd.server_address[1]
+            service.card["url"] = f"http://127.0.0.1:{port}/"
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                client = A2AClient.connect(service.card["url"])
+                task = client.run_task(
+                    "write the report", timeout=15, grant=WorkGrant(workspace=case)
+                )
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+            self.assertEqual(task["status"]["state"], models.TASK_COMPLETED)
+            # The relative path resolved inside the granted directory, not the
+            # server's own workspace.
+            self.assertEqual((case / "report.txt").read_text(encoding="utf-8"), "hello")
+            self.assertFalse((home / "report.txt").exists())
+
+
+class DelegationGrantTests(unittest.TestCase):
+    """The caller-side gate: you can only hand over what you can write."""
+
+    def test_delegate_task_sends_a_grant_it_may_hand_over(self) -> None:
+        agent = ScriptedAgent("done")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "case-7").mkdir()
+            policy = GrantPolicy(roots=(root,))
+            with ServedAgent(agent, grant_policy=policy) as served:
+                config = _config(root, root / "agents")
+                tool = DelegateTaskTool(config=config, depth=0, pool=PeerPool(config))
+                result = tool.run(
+                    ToolContext(root),
+                    task="finish the draft",
+                    agent_url=served.base_url,
+                    workspace="case-7",
+                )
+
+            self.assertTrue(result.ok, result.content)
+            self.assertEqual(served.grants[0].workspace, root / "case-7")
+
+    def test_a_path_the_caller_cannot_write_is_refused_before_sending(self) -> None:
+        agent = ScriptedAgent("done")
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
+            root = Path(tmp).resolve()
+            with ServedAgent(agent, grant_policy=GrantPolicy(allow_any=True)) as served:
+                config = _config(root, root / "agents")
+                tool = DelegateTaskTool(config=config, depth=0, pool=PeerPool(config))
+                result = tool.run(
+                    ToolContext(root),
+                    task="finish the draft",
+                    agent_url=served.base_url,
+                    allowed_paths=[str(Path(outside).resolve())],
+                )
+
+            self.assertFalse(result.ok)
+            self.assertIn("Cannot hand over that work directory", result.content)
+            # Nothing was sent: the peer never heard about the subtask.
+            self.assertEqual(agent.prompts, [])
+
+    def test_a_configured_writable_path_may_be_handed_on(self) -> None:
+        agent = ScriptedAgent("done")
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as shared:
+            root = Path(tmp).resolve()
+            shared_root = Path(shared).resolve()
+            with ServedAgent(agent, grant_policy=GrantPolicy(allow_any=True)) as served:
+                config = _config(root, root / "agents", writable=(shared_root,))
+                tool = DelegateTaskTool(config=config, depth=0, pool=PeerPool(config))
+                result = tool.run(
+                    ToolContext(root),
+                    task="use the price list",
+                    agent_url=served.base_url,
+                    allowed_paths=[str(shared_root / "prices.xlsx")],
+                )
+
+            self.assertTrue(result.ok, result.content)
+            self.assertEqual(served.grants[0].allowed_paths, (shared_root / "prices.xlsx",))
+
+    def test_parallel_subtasks_carry_their_own_grants(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for name in ("case-a", "case-b"):
+                (root / name).mkdir()
+            policy = GrantPolicy(roots=(root,))
+            with ServedAgent(ScriptedAgent("done"), grant_policy=policy) as served:
+                config = _config(root, root / "agents")
+                tool = DelegateTasksTool(config=config, depth=0, pool=PeerPool(config))
+                result = tool.run(
+                    ToolContext(root),
+                    tasks=[
+                        {"task": "a", "agent_url": served.base_url, "workspace": "case-a"},
+                        {"task": "b", "agent_url": served.base_url, "workspace": "case-b"},
+                    ],
+                )
+
+            self.assertTrue(result.ok, result.content)
+            granted = sorted(str(grant.workspace) for grant in served.grants)
+            self.assertEqual(granted, [str(root / "case-a"), str(root / "case-b")])
+
+    def test_one_refused_subtask_does_not_stop_the_others(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
+            root = Path(tmp).resolve()
+            (root / "case-a").mkdir()
+            policy = GrantPolicy(roots=(root,))
+            with ServedAgent(ScriptedAgent("done"), grant_policy=policy) as served:
+                config = _config(root, root / "agents")
+                tool = DelegateTasksTool(config=config, depth=0, pool=PeerPool(config))
+                result = tool.run(
+                    ToolContext(root),
+                    tasks=[
+                        {"task": "a", "agent_url": served.base_url, "workspace": "case-a"},
+                        {
+                            "task": "b",
+                            "agent_url": served.base_url,
+                            "workspace": str(Path(outside).resolve()),
+                        },
+                    ],
+                )
+
+            self.assertTrue(result.ok, result.content)
+            self.assertIn("1 completed, 1 failed", result.content)
+            self.assertIn("Cannot hand over that work directory", result.content)
+            self.assertEqual(len(served.grants), 1)
+
+
 class PeerRegistryTests(unittest.TestCase):
     def test_parse_named_and_bare_urls(self) -> None:
         peers = parse_peers("office=http://127.0.0.1:8801/, http://example.com:9000/")
@@ -688,6 +1042,40 @@ class LocalSpawnTests(unittest.TestCase):
                     )
                 endpoints = {client.endpoint for client in clients}
                 self.assertEqual(len(endpoints), 1, f"spawned more than one server: {endpoints}")
+            finally:
+                pool.shutdown()
+
+
+    def test_a_spawned_child_accepts_a_grant_inside_the_parents_reach(self) -> None:
+        """A locally spawned peer inherits the parent's reach, so a grant lands.
+
+        No LLM is involved: the grant is authorized (or refused) before the
+        child builds an agent, so an unauthorized path fails and an authorized
+        one gets past the gate.
+        """
+
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
+            root = Path(tmp)
+            agents_dir = root / "agents"
+            (root / "case-7").mkdir()
+            write_profile(agents_dir, "helper", skills=["datetime"])
+            pool = PeerPool(_config(root, agents_dir))
+            try:
+                client = pool.connect(name="helper")
+
+                # Inside the parent's workspace: the child authorizes it and
+                # starts working (the LLM call then fails harmlessly).
+                inside = client.send_message(
+                    "noop", grant=WorkGrant(workspace=root / "case-7")
+                )
+                self.assertEqual(inside.get("kind"), "task")
+
+                # Outside it: refused by the child's own policy, before any work.
+                with self.assertRaises(A2AClientError) as caught:
+                    client.send_message(
+                        "noop", grant=WorkGrant(workspace=Path(outside).resolve())
+                    )
+                self.assertIn(str(models.INVALID_PARAMS), str(caught.exception))
             finally:
                 pool.shutdown()
 

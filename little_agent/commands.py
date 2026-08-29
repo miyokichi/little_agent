@@ -30,14 +30,15 @@ from little_agent import agents as agent_profiles
 
 if TYPE_CHECKING:
     from little_agent.agent import Agent
+    from little_agent.session import ChatSession
 
 
 @dataclass(slots=True)
 class DispatchResult:
     """What the CLI should do after a slash command is handled.
 
-    ``output`` is printed immediately. ``agent_prompt`` (if set) is passed to
-    ``agent.run()`` and its answer printed. ``should_exit`` ends the session.
+    ``output`` is printed immediately. ``agent_prompt`` (if set) is sent through
+    the chat session and its answer printed. ``should_exit`` ends the session.
     """
 
     output: str | None = None
@@ -49,15 +50,24 @@ class DispatchResult:
 class CommandContext:
     """References a built-in handler may read from or mutate.
 
+    Handlers act on the :class:`~little_agent.session.ChatSession` rather than a
+    bare agent, because commands like ``/clear`` and ``/remember`` are about the
+    conversation and its memory, not the runtime. ``agent`` is the session's
+    current agent, for handlers that only need to inspect tools or config.
+
     ``activate`` is supplied by the CLI to switch the running agent to another
-    profile; it rebuilds ``agent`` (fresh context) and returns a status string.
+    profile; it swaps the session's agent and returns a status string.
     ``active_agent`` is the current profile name, or ``None`` for the library.
     """
 
-    agent: "Agent"
+    session: "ChatSession"
     registry: "CommandRegistry"
     active_agent: str | None = None
     activate: Callable[[str], str] | None = None
+
+    @property
+    def agent(self) -> "Agent":
+        return self.session.agent
 
 
 BuiltinHandler = Callable[[CommandContext, str], DispatchResult]
@@ -311,6 +321,8 @@ def _cmd_config(ctx: CommandContext, args: str) -> DispatchResult:
         f"  api_key            : {'set' if config.openai_api_key else 'not set (local fallback)'}",
         f"  commands (project) : {config.commands_dir}",
         f"  commands (global)  : {config.global_commands_dir}",
+        f"  memory             : {ctx.session.memory.describe()}",
+        f"  conversation       : {len(ctx.session.history)} message(s) in this session",
     ]
     return DispatchResult(output="\n".join(lines))
 
@@ -322,6 +334,46 @@ def _cmd_reload(ctx: CommandContext, args: str) -> DispatchResult:
 
 def _paths_text(paths: tuple[Path, ...]) -> str:
     return ", ".join(str(path) for path in paths) if paths else "(none)"
+
+
+def _cmd_clear(ctx: CommandContext, args: str) -> DispatchResult:
+    dropped = ctx.session.clear()
+    return DispatchResult(
+        output=f"Conversation cleared ({dropped} message(s) dropped). Persistent memory is untouched."
+    )
+
+
+def _cmd_memory(ctx: CommandContext, args: str) -> DispatchResult:
+    store = ctx.session.memory
+    if not store.enabled:
+        return DispatchResult(
+            output=(
+                "Persistent memory is off for this session, so nothing is loaded or saved.\n"
+                "The conversation itself is still kept until you exit or /clear.\n"
+                "Start without --no-memory to turn it on."
+            )
+        )
+    sections = store.sections()
+    if not sections:
+        return DispatchResult(output=f"Memory is on but still empty.\n  {store.describe()}")
+    lines = [store.describe(), ""]
+    for heading, body in sections:
+        lines.append(f"## {heading}")
+        lines.append(body)
+        lines.append("")
+    return DispatchResult(output="\n".join(lines).rstrip())
+
+
+def _cmd_remember(ctx: CommandContext, args: str) -> DispatchResult:
+    if not ctx.session.memory.enabled:
+        return DispatchResult(output="[memory] off for this session; there is nothing to save to.")
+    try:
+        learned = ctx.session.learn()
+    except Exception as exc:  # noqa: BLE001 - a failed reflection must not end the session.
+        return DispatchResult(output=f"[memory] auto-learning skipped: {exc}")
+    return DispatchResult(
+        output="[memory] learned from this session." if learned else "[memory] nothing new to learn."
+    )
 
 
 def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:
@@ -375,6 +427,11 @@ def _builtin_commands() -> list[BuiltinCommand]:
         BuiltinCommand("usage", "Show this session's token usage.", _cmd_usage),
         BuiltinCommand("config", "Show the current configuration.", _cmd_config),
         BuiltinCommand("reload", "Reload custom commands from disk.", _cmd_reload),
+        BuiltinCommand("clear", "Clear the conversation (persistent memory is kept).", _cmd_clear),
+        BuiltinCommand("memory", "Show what persistent memory holds.", _cmd_memory),
+        BuiltinCommand(
+            "remember", "Distil durable memory from this session now.", _cmd_remember
+        ),
         BuiltinCommand("agents", "List agent profiles.", _cmd_agents),
         BuiltinCommand("agent", "Show or switch the active agent (/agent <name>).", _cmd_agent),
     ]

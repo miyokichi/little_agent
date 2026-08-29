@@ -14,6 +14,7 @@ from little_agent.commands import (
     render_template,
 )
 from little_agent.config import AgentConfig
+from little_agent.session import ChatSession
 from little_agent.skills.loader import SkillLoader
 
 
@@ -39,7 +40,7 @@ def _context(registry: CommandRegistry, workspace: Path) -> tuple[CommandContext
         enable_logging=False,
     )
     agent = Agent(config, SkillLoader(Path("skills").resolve()))
-    return CommandContext(agent=agent, registry=registry), agent
+    return CommandContext(session=ChatSession(agent), registry=registry), agent
 
 
 class RenderTemplateTests(unittest.TestCase):
@@ -184,7 +185,9 @@ class AgentCommandTests(unittest.TestCase):
             agents_dir=(root / "agents").resolve(),
         )
         agent = Agent(config, SkillLoader(Path("skills").resolve()))
-        return CommandContext(agent=agent, registry=registry, active_agent=active)
+        return CommandContext(
+            session=ChatSession(agent), registry=registry, active_agent=active
+        )
 
     def test_agents_lists_builtin_default_when_empty(self) -> None:
         with TemporaryDirectory() as tmp:

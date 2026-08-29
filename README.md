@@ -1,31 +1,32 @@
 # Little Agent
 
-Skill と Tool を LLM に与えて、**外部から渡された1件の仕事を実行し、結果を返す**だけの軽量な Agent Runtime です。
+Skill と Tool を LLM に与えて仕事を実行する、軽量な Agent Runtime です。
 
-Little Agent 自身は、長期メモリ・プロジェクト・タスク・ゴール・ワークフローを**持ちません**。状況情報は毎回外部から渡され、実行が終われば破棄されます。何をどう進めるかを決めるのは、この Runtime を呼び出す側（外部オーケストレータや人間）の役割です。
+Runtime は**1本**で、その上に **Chat**（人と対話する）と **A2A**（外部システムから1件の仕事を受ける）という2つの入口が載ります。LLM・Tool Loop・Skill実行・Workspace・緊急停止・usage計測は、どちらの入口でも同じコードです。
 
 ```text
-External System
-      │
-      │ A2A
-      ▼
- little_agent
-      │
-      ├─ Agent Profile   … 使えるSkill/Toolの能力contract
-      ├─ LLM Client      … OpenAI互換 Chat Completions
-      ├─ Agent Loop      … multi-step tool loop（stateless）
-      ├─ Skills          … SKILL.md + skill script tools
-      └─ Tools           … core tools + skill tools
-      │
-      ▼
-    Result（TextPart または DataPart）
-      │
-      │ A2A
-      ▼
-External System
+                    Agent Runtime
+                    （LLM / Tool Loop / Skill / Workspace
+                      / cancellation / usage）
+                     /                    \
+                  Chat                     A2A
+        little-agent chat          little-agent serve-a2a
+                  │                          │
+       会話履歴あり／永続memory可      Taskごとに独立・永続memoryなし
 ```
 
-外部APIは **A2A（Agent2Agent）プロトコル**です。独自のRESTやRPCは持ちません。CLI はローカルデバッグ用の薄い入口で、同じ Runtime を呼びます。
+構成は6つの領域に分かれます。
+
+| 領域 | 場所 | 役割 |
+| --- | --- | --- |
+| **Core Runtime** | `little_agent/agent.py`, `factory.py` | 1回の実行。system prompt構築 → tool loop → 結果 |
+| **Chat** | `little_agent/session.py`, `cli.py`, `commands.py` | 会話履歴を持ち、毎ターン Runtime に渡す |
+| **A2A** | `little_agent/a2a/` | Agent Card・JSON-RPC・Task・workspace grant |
+| **Memory** | `little_agent/memory/` | 永続memoryの抽象。Runtimeとは疎結合 |
+| **Workspace** | `little_agent/tools/base.py`, `paths.py`, `a2a/grant.py` | 読み書きできる範囲の決定と検証 |
+| **Skills** | `little_agent/skills/`（loader）, `skills/`（実装） | Skill定義とSkill Tool。coreから分離 |
+
+Runtime 自身は実行の間に何も持ち越しません。会話を続けたい側（Chat）が履歴を保持して渡し、独立させたい側（A2A）は何も渡しません。
 
 ## 実行環境
 
@@ -56,12 +57,40 @@ LITTLE_AGENT_MODEL=local-model-name
 
 注意: このAgentはTool実行のために `tools` / `tool_calls` を使います。互換API側がtool callingに対応していない場合、通常の返答はできてもTool実行は動かない可能性があります。
 
+## 起動モード
+
+```powershell
+little-agent chat                                   # 対話。永続memoryあり
+little-agent chat --no-memory                       # 対話。永続memoryなし
+little-agent serve-a2a --agent observer --port 8801 # A2Aサーバとして公開
+```
+
+引数なしの `little-agent` は `chat` として起動します（`python -m little_agent` / `python main.py` も同じ）。
+
+| | 会話履歴 | 永続memory | 1回の実行の独立性 |
+| --- | --- | --- | --- |
+| `chat` | セッション中は保持 | `FileMemoryStore`（読み書きする） | 会話として連続 |
+| `chat --no-memory` | セッション中は保持 | `NullMemoryStore`（一切触らない） | 会話として連続 |
+| `serve-a2a` | 持たない | `NullMemoryStore`（一切触らない） | Taskごとに完全独立 |
+
+`--no-memory` は「保存を我慢する」モードではありません。`NullMemoryStore` が入るため、memoryファイルは**開かれもせず**、`update_workspace_memory` / `update_global_memory` Tool はそもそも存在しません。A2Aサーバも同じで、誰かの永続memoryを読み書きすることはありません。
+
+`chat` / `serve-a2a` 共通のオプション:
+
+| オプション | 内容 |
+| --- | --- |
+| `--agent <name>` | 使うAgent Profile（省略時は `default`、chatでは対話選択） |
+| `--readable-path <PATH>` | ワークスペース外で**読める**パスを追加（繰り返し可） |
+| `--writable-path <PATH>` | ワークスペース外で**読み書きできる**パスを追加（繰り返し可） |
+
+`serve-a2a` のみ: `--host`、`--port`、`--auto-approve`、`--allow-any-path`。
+
 ## Agent execution
 
 `agent.run()` の1回が、独立した1回の実行です。
 
 ```text
-instruction + context + Agent Profile(Skills/Tools)
+instruction + context + history + Agent Profile(Skills/Tools) + Memory
         ↓
      Agent Loop（LLM → tool_calls → Tool実行 → tool result → …）
         ↓
@@ -75,12 +104,14 @@ result = agent.run(
     "このObservationを解釈してください",
     context={"observation": {...}, "world_state": {...}},
     output_schema={"type": "object", "required": ["state_deltas"]},  # 任意
+    history=None,  # 任意。Chatだけが渡す
 )
 result.text  # 常に文字列
 result.data  # output_schema を渡したときだけ、検証済みのJSON値
 ```
 
-- **stateless**: 実行中のmessage履歴（user → tool_call → tool_result → …）は実行内でのみ保持され、終了時に破棄されます。前回の実行が次回のsystem promptやcontextに影響することはありません。
+- **Runtime自身は状態を持ちません**: 実行中のmessage履歴（user → tool_call → tool_result → …）は実行内でのみ保持され、終了時に破棄されます。
+- **継続は呼ぶ側の責任**: 会話を続けたいときは `history` に過去のやり取りを渡します。Runtimeはそれを**コピーして使い、書き換えず、実行後に忘れます**。A2Aは何も渡さないので、Task同士は構造的に混ざりません。
 - **context は毎回外部から**: `context` はそのまま実行用プロンプトにJSONとして差し込まれ、永続化されません。
 - **確認の一括承認も実行単位**: 確認が必要なToolを一度承認すると、その実行の残りは再確認なしで進みますが、次の実行では再び確認されます。
 
@@ -103,6 +134,49 @@ LLM final output
 
 内蔵バリデータが扱うキーワード: `type`（単数/配列）、`enum`、`const`、`properties`、`required`、`additionalProperties`、`items`、`minItems`/`maxItems`、`minLength`/`maxLength`、`minimum`/`maximum`、`anyOf`/`oneOf`/`allOf`。未知のキーワードは無視します。
 
+## Memory
+
+Agent Core は永続memoryを直接知りません。`MemoryStore` を1つ持ち、そこに3つのことだけを聞きます。
+
+```text
+MemoryStore
+├─ FileMemoryStore   … markdownファイルに保存する（chat 既定）
+└─ NullMemoryStore   … 何も持たない（chat --no-memory / A2A）
+```
+
+| 呼び出し | 内容 |
+| --- | --- |
+| `sections()` | system promptに差し込む見出しと本文 |
+| `tools()` | memoryを書き換えるTool |
+| `learn()` | セッションを要約して恒久プロファイルに落とす |
+
+`NullMemoryStore` はこの3つすべてに「無い」と答えるので、memory機能はコードから消えるのではなく**その実行に存在しなくなります**。
+
+`FileMemoryStore` が扱うファイル:
+
+| ファイル | 内容 | 誰が書くか |
+| --- | --- | --- |
+| `{workspace}/memory.md` | このワークスペース固有の記憶 | `update_workspace_memory` Tool / 人が直接編集 |
+| `~/.little_agent/memory.md` | 全ワークスペース共通の記憶 | `update_global_memory` Tool / 人が直接編集 |
+| `{workspace}/profile.md` | 会話から自動抽出したワークスペース像 | セッション終了時と `/remember` |
+| `~/.little_agent/profile.md` | 会話から自動抽出したユーザー像 | セッション終了時と `/remember` |
+
+前2つは「意図して書く」memory、後2つは auto-learning（reflection）が更新するプロファイルです。グローバル側のパスは `LITTLE_AGENT_GLOBAL_MEMORY_PATH` / `LITTLE_AGENT_GLOBAL_PROFILE_PATH`、auto-learningの有無は `LITTLE_AGENT_AUTO_LEARNING` で変えられます。
+
+## Workspace
+
+すべてのファイル操作は、明示的に許可された範囲の内側に制限されます。
+
+```text
+readable  = workspace + LITTLE_AGENT_READABLE_PATHS + LITTLE_AGENT_WRITABLE_PATHS
+writable  = workspace + LITTLE_AGENT_WRITABLE_PATHS
+```
+
+- 区切りはWindowsなら `;`、それ以外は `:`。相対パスはワークスペース基準です。
+- ディレクトリを指定すればその配下すべて、単一ファイルを指定すればそのファイルだけが対象になります。
+- 書き込み可能なパスは、**A2Aで他エージェントに渡せる範囲**でもあります（[workspace / allowed_paths](#ワークの受け渡し先を指定するworkspace--allowed_paths)）。読むだけのパスは渡せません。
+- 有効な範囲は system prompt にも出るので、モデルは自分がどこまで触れるかを知った上で動きます。
+
 ## Tool仕様
 
 Toolは `little_agent/tools` に実装します。各Toolは次の属性とメソッドを持ちます。
@@ -117,26 +191,52 @@ Core Tool:
 
 | Tool | 内容 | 確認 |
 | --- | --- | --- |
-| `list_dir` | ワークスペース内のディレクトリ一覧 | 不要 |
+| `list_dir` | ディレクトリ一覧 | 不要 |
 | `read_file` | UTF-8テキストファイルを読む | 不要 |
 | `write_file` | UTF-8テキストファイルを書く | 必要 |
 | `append_to_file` | テキストファイルに追記 | 必要 |
 | `move_file` / `delete_file` | ファイルの移動・削除 | 必要 |
-| `search_files` | ワークスペース内の文字列検索 | 不要 |
+| `search_files` | 文字列検索 | 不要 |
 | `run_powershell` | PowerShellコマンドを実行 | 必要 |
 | `fetch_url` | http(s) URLの取得 | 不要 |
 | `delegate_task` | サブタスク1件をA2Aで別のエージェントに委譲 | 必要 |
 | `delegate_tasks` | 独立した複数サブタスクをA2Aで**並列**委譲 | 必要 |
 
-すべてのファイル操作は `LITTLE_AGENT_WORKSPACE` の内側に制限されます。どのCore Toolを使えるかは Agent Profile の `core_tools` で絞れます（`delegate_task` / `delegate_tasks` も対象）。
+memory ONのchatではこれに `update_workspace_memory` / `update_global_memory` が加わります（MemoryStoreが供給するので、他のモードには存在しません）。
+
+どのCore Toolを使えるかは Agent Profile の `core_tools` で絞れます（`delegate_task` / `delegate_tasks` も対象）。
 
 ### PowerShell実行の安全仕様
 
 `run_powershell` はワークスペースをカレントディレクトリとして実行し、`Remove-Item` / `rm` / `rmdir` / `del` / `Format-Volume` / `Stop-Computer` / `Restart-Computer` / `Set-ExecutionPolicy` などの破壊的トークンを簡易ガードでブロックします。完全なサンドボックスではありません。
 
-## Agent Skill仕様
+## Skills
 
-Agent Skillは `skills/<skill_name>/SKILL.md` に配置します。
+Skillは **`skills/` にフォルダを置くだけ**で使えます。Skill実装とCore Runtimeは分離されており、Skill Loader だけが両者をつなぎます。
+
+```text
+little_agent/
+├─ agent.py
+├─ ...
+└─ skills/            # Skillの読み込み機構（core側）
+   ├─ loader.py
+   ├─ models.py
+   └─ script_tool.py
+
+skills/               # Skillの実装（データ側）
+├─ file_manager/
+├─ python_coder/
+├─ windows_operator/
+├─ excel_file/
+├─ ppt_file/
+└─ ...
+```
+
+- Core Runtime に個別Skillの依存を足すことはしません。Skillスクリプトも `little_agent` を import しません（依存は一方向）。
+- 新しいSkillの追加は `skills/` にフォルダを足すだけで、coreの変更も登録作業も不要です。
+- 外部リポジトリ化やgit submodule化はしていません。Skillはこのリポジトリに同梱されます。
+
+### SKILL.md
 
 ```markdown
 # skill_name
@@ -174,6 +274,8 @@ skills/<skill_name>/
 {
   "tool": "tool_name",
   "workspace": "C:/path/to/workspace",
+  "readable_paths": ["C:/path/to/reference"],
+  "writable_paths": ["C:/path/to/shared"],
   "arguments": {}
 }
 ```
@@ -188,27 +290,36 @@ skills/<skill_name>/
 }
 ```
 
+標準入出力は**両側ともUTF-8に固定**されるので、日本語を返すSkillもコンソールのコードページに影響されません。`scripts/` の外を指すスクリプトを書いたmanifestは読み込み時に拒否されます。
+
 `skills/<skill_name>` フォルダをコピーするだけで、Skillの説明・Tool定義・実行ロジックをまとめて移動できます。
 
 ### 同梱Skill
 
-- `file_manager`: ファイル探索・読み書き・検索
-- `python_coder`: Python実装・調査・実行確認
-- `windows_operator`: Windows/PowerShell操作
-- `skill_creator`: ポータブルSkillの作成、雛形生成、簡易検証（`create_skill` / `validate_skill`）
-- `excel_file`: `.xlsx` の読み取りと簡易作成（`read_excel` / `write_excel`）
-- `ppt_file`: `.pptx` のテキスト読み取りと簡易作成（`read_ppt` / `write_ppt`）
-- `datetime`: 現在日時・曜日・タイムゾーンの取得
-- `git`: gitリポジトリの状態確認・差分・コミット
-- `screen_capture`: PC画面のスクリーンショット取得（Vision対応モデルへ画像を直接渡す）
-- `computer_use`: マウス/キーボードによるPC操作
-- `outlook-email-extractor`: Outlookからのメール抽出
+| Skill | 内容 |
+| --- | --- |
+| `file_manager` | ファイル探索・読み書き・検索 |
+| `python_coder` | Python実装・調査・実行確認 |
+| `windows_operator` | Windows/PowerShell操作 |
+| `excel_file` | `.xlsx` の読み取りと簡易作成（`read_excel` / `write_excel`） |
+| `ppt_file` | `.pptx` のテキスト読み取りと簡易作成（`read_ppt` / `write_ppt`） |
+| `workspace_harness` | 「1タスク=1フォルダ」のファイルシステム型タスクハーネス。人がエリアを統制し、AIはその中で作業する |
+| `project_manager` | `data/projects.json` による依存関係付きプロジェクト/タスク管理。ローカルWebビューアで人も編集できる |
+| `agent_manager` | Agent Profile（`agents/<name>/agent.json`）の作成・編集 |
+| `skill_creator` | ポータブルSkillの作成、雛形生成、簡易検証（`create_skill` / `validate_skill`） |
+| `datetime` | 現在日時・曜日・タイムゾーンの取得 |
+| `git` | gitリポジトリの状態確認・差分・コミット |
+| `screen_capture` | PC画面のスクリーンショット取得（Vision対応モデルへ画像を直接渡す） |
+| `computer_use` | マウス/キーボードによるPC操作 |
+| `outlook-email-extractor` | Outlookからのメール抽出 |
 
-Officeファイル系は外部ライブラリなしでOffice Open XMLを扱います（`.xls` / `.ppt` は非対応、読み取りと簡易新規作成が中心）。`screen_capture` は `mss` + `Pillow`、`computer_use` は `pyautogui` が必要です。
+Officeファイル系は外部ライブラリなしでOffice Open XMLを扱います（`.xls` / `.ppt` は非対応、読み取りと簡易新規作成が中心）。`screen_capture` は `mss` + `Pillow`、`computer_use` は `pyautogui` が必要です。`project_manager` のビューアは `skills/project_manager/scripts/viewer.py` としてSkillフォルダ内に同梱されています（coreには入っていません）。
+
+`workspace_harness` は `tasks/`（`LITTLE_AGENT_TASKS_DIR`）と `shared/`（`LITTLE_AGENT_SHARED_DIR`）を使います。リポジトリにサンプルが入っています。
 
 ## Agent Profile
 
-Agent Profile は「**そのエージェントが何のSkillとToolを使えるか**」を定義する能力contractです。Runtime側は profile を読むだけで、書き換えません（エージェントが自分の構成を永続的に変更する機能はありません）。
+Agent Profile は「**そのエージェントが何のSkillとToolを使えるか**」を定義する能力contractです。Runtime側は profile を読むだけで、書き換えません。
 
 ```text
 skills/                     # ライブラリ: 全スキルのマスター
@@ -256,19 +367,23 @@ Little Agent の外部インタフェースは A2A です。Agent Card による
 | メソッド | `message/send`、`tasks/get`、`tasks/cancel` |
 | Part | `TextPart` と `DataPart`（入力・出力とも） |
 | タスク状態 | `submitted` / `working` / `completed` / `canceled` / `failed` |
-| 未対応 | `message/stream`（SSE）と push通知。Agent Card で `streaming: false` と宣言し、要求時は `-32004 UnsupportedOperation` を返します |
+| 作業場所 | metadata で `workspace` / `allowed_paths` を要求可（サーバ側で検証） |
+| 認可 | `LITTLE_AGENT_A2A_TOKEN` による Bearer トークン |
+| 未対応 | `message/stream`（SSE）は `-32004 UnsupportedOperation`、`tasks/pushNotificationConfig/*` は `-32003 PushNotificationNotSupported` |
 
-A2Aタスク1件が Agent 実行1回に対応し、タスクごとに新しいエージェントを構築するので、タスク間でコンテキストは混ざりません。
+A2Aタスク1件が Agent 実行1回に対応します。タスクごとに新しいエージェントを構築し、履歴を渡さず、`NullMemoryStore` を与えるので、**タスク間でコンテキストも記憶も共有されません**。
+
+SSEとpush通知はどちらも仕様上optionalで、Agent Cardで `false` と宣言しています。現在の設計では委譲が1回のブロッキングTool呼び出しなので、逐次出力の消費者がおらず、クライアントはタスクの間ずっと生きている前提です。非同期委譲を入れる段階になったら再検討します。
 
 ### サーバとして公開する
 
 ```powershell
-little-agent --serve-a2a --agent observer --port 8801
+little-agent serve-a2a --agent observer --port 8801
 # または
 python -m little_agent.a2a.serve --agent observer --port 8801
 ```
 
-- サーバは既定で `127.0.0.1` のみにバインドします。`LITTLE_AGENT_A2A_TOKEN` を設定すると Bearer トークン必須になり、Agent Card の `securitySchemes` に公開されます（カード自体は公開のまま）。
+- サーバは既定で `127.0.0.1` のみにバインドします。`LITTLE_AGENT_A2A_TOKEN` を設定すると Bearer トークン必須になり、Agent Card の `securitySchemes` に公開されます（カード自体は発見のため公開のまま）。
 - サーバ側には確認プロンプトを出せる人間がいないため、**確認が必要なToolは既定で拒否**します。許可するには `--auto-approve` または `LITTLE_AGENT_A2A_AUTO_APPROVE=true`。
 - `tasks/cancel` はそのタスクの停止フラグを立て、Tool実行の合間でエージェントを中断させます（緊急停止ホットキーと同じ仕組み）。
 
@@ -276,7 +391,7 @@ python -m little_agent.a2a.serve --agent observer --port 8801
 
 `message/send` の parts には TextPart と DataPart のどちらも渡せます。
 
-**テキストだけ**（従来どおり）:
+**テキストだけ**:
 
 ```json
 {"parts": [{"kind": "text", "text": "READMEを要約して"}]}
@@ -310,13 +425,48 @@ python -m little_agent.a2a.serve --agent observer --port 8801
 - TextPart と DataPart の `instruction` が両方ある場合は連結されます。
 - 指示が1つも無い場合は `-32005 ContentTypeNotSupported` になります。
 
-**結果**: `output_schema` を指定した実行は、artifact が DataPart で返ります。指定しない実行は従来どおり TextPart です。
+**結果**: `output_schema` を指定した実行は、artifact が DataPart で返ります。指定しない実行は TextPart です。
 
 ```json
 {"parts": [{"kind": "data", "data": {"state_deltas": [], "confidence": 0.91}}]}
 ```
 
-Skill名を直接指定する独自パラメータはありません。能力の境界は Agent Profile（observer / planner / evaluator …）で表現し、Profile内でのSkill自動選択に任せます。
+Skill名を直接指定する独自パラメータはありません。能力の境界は Agent Profile で表現し、Profile内でのSkill自動選択に任せます。
+
+### ワークの受け渡し先を指定する（workspace / allowed_paths）
+
+「この案件フォルダで作業して」「共有ドライブのこの資料も見ていい」という**作業場所ごと**の受け渡しができます。`workspace` と `allowed_paths` はA2Aメッセージの metadata（`littleAgent/workspace` / `littleAgent/allowedPaths`）に載り、受け取った側は**自分の設定に照らして検査**してから、そのタスク専用の作業範囲として採用します。理解しない相手はmetadataを無視して自分のワークスペースで動くだけなので、相互運用性は壊れません。
+
+```jsonc
+// delegate_task の引数
+{
+  "task": "reports/q3 の下書きを仕上げて data/売上.xlsx の数字と突き合わせて",
+  "agent": "office",
+  "workspace": "reports/q3",                 // 自分のワークスペース基準の相対パスでよい
+  "allowed_paths": ["D:\\shared\\売上.xlsx"]  // ワークスペース外は明示的に渡す
+}
+```
+
+- `workspace` を渡すと、相手はそのディレクトリを**そのタスクのワークスペース**として動きます（相対パスのTool引数もそこ基準）。ディレクトリが無ければ作成されます。省略すると相手自身のワークスペースのままです。
+- `allowed_paths` はワークスペース**外**の例外リストで、読み書き両方を意味します。渡さなければ相手側の設定のままで、上書きしません。
+- `delegate_tasks` でもサブタスクごとに同じ2つを指定できます（案件フォルダ別に並列で走らせられます）。
+- タスクが終われば効力も終わります。1タスク＝1エージェントなので、他のタスクには漏れません。
+
+**渡せる範囲**（2段階で検査します）:
+
+1. **渡す側** … 自分が書き込めるパス（自分のワークスペース＋自分の `LITTLE_AGENT_WRITABLE_PATHS`）しか渡せません。委譲を経由して自分の権限を広げることはできません。読むだけのパスも渡せません。
+2. **受け取る側** … 受け取ったパスを、サーバ自身のワークスペースと書き込み可能パス（起動時の `--writable-path` を含む）に照らして検査し、外れていれば `-32602 InvalidParams` で断ります。grantを一切受け付けない設定のサーバも同じくエラーを返します。
+
+渡す側の検査に落ちたサブタスクは**送信前に**失敗し、受け取る側に断られたサブタスクも**相手が作業を始める前に**失敗します。どちらも理由（どのパスが、どの許可範囲から外れたか）がそのままToolの結果に返ります。
+
+ローカルプロファイルへの委譲では、自動起動する子サーバに親と同じワークスペースと許可パスを引き継ぐので、親が到達できる場所はそのまま渡せます。手動で起動するサーバは次のように許可範囲を決めます。
+
+```powershell
+# 共有ドライブを渡せるようにして公開する
+little-agent serve-a2a --agent office --port 8801 --writable-path D:\shared
+# 信頼できる自分専用サーバなら、検査自体を外すこともできる（既定はオフ）
+python -m little_agent.a2a.serve --port 8801 --allow-any-path
+```
 
 ### クライアントとして委譲する（delegate_task / delegate_tasks）
 
@@ -330,6 +480,8 @@ Core Tool の `delegate_task`（1件）と `delegate_tasks`（複数を並列）
 | `agent` | 任意。ローカルのプロファイル名、または設定済みリモートピア名。省略すると `default` |
 | `agent_url` | 任意。A2Aエージェントのベースを直接指定（例 `http://127.0.0.1:8801/`）。`agent` より優先 |
 | `background` | 任意。作業前に渡す前提・素材 |
+| `workspace` | 任意。相手がこのタスクでワークスペースとして使うディレクトリ |
+| `allowed_paths` | 任意。そのワークスペース外で相手が読み書きしてよいファイル・ディレクトリの配列 |
 
 `delegate_tasks` は同じ形のオブジェクトの配列を取り、それぞれを独立したA2Aタスクとして同時に走らせます。
 
@@ -356,15 +508,14 @@ Copy-Item .env.example .env
 
 設定は `.env`（または環境変数）で行います。項目の一覧と説明は `.env.example` を参照してください。
 
-## CLI（ローカルデバッグ用）
+## Chat
 
 ```powershell
-python main.py
-# または editable install 後
-little-agent
+little-agent chat
+little-agent chat --no-memory
 ```
 
-CLIは同じ stateless Runtime を呼ぶ薄いインタフェースです。**1入力＝1実行**で、前の入力の内容は次に持ち越されません。
+`>` プロンプトで入力します。**会話は続きます**（前のターンの内容は次のターンでも参照できます）。一方で、Tool実行の途中経過は次のターンには持ち越しません — 残るのはユーザー発言とAgentの最終回答だけです。
 
 ### スラッシュコマンド
 
@@ -379,14 +530,19 @@ CLIは同じ stateless Runtime を呼ぶ薄いインタフェースです。**1�
 | コマンド | エイリアス | 動作 |
 | --- | --- | --- |
 | `/help` | `/?` | 全コマンドを説明付きで一覧 |
-| `/exit` | `/quit` | セッション終了 |
+| `/exit` | `/quit` | セッション終了（memory ONならここで auto-learning が走る） |
 | `/skills` | | 読み込み済みSkillを一覧（`/skills <name>` で詳細） |
 | `/tools` | | 登録済みToolを一覧 |
 | `/usage` | | 当セッションのtoken累計を表示 |
-| `/config` | | model・workspace・確認要否などの設定を表示 |
+| `/config` | | model・workspace・memory状態などの設定を表示 |
 | `/reload` | | `commands/*.md` を再読込 |
+| `/clear` | | 会話をリセット（永続memoryは消しません） |
+| `/memory` | | 永続memoryの内容を表示（OFFならその旨を表示） |
+| `/remember` | | いまの会話から恒久memoryを抽出して保存 |
 | `/agents` | | エージェントプロファイルを一覧（アクティブは `*`） |
 | `/agent` | | アクティブなエージェントを表示 / `/agent <name>` で切替 |
+
+`/agent` で切り替えても**会話は続きます**。切り替わるのは能力（Skill/Tool）であって、話している相手の記憶ではありません。
 
 `commands/<name>.md` を置くと `/name` で使えるユーザー定義コマンドになります。探索先はプロジェクト（`LITTLE_AGENT_COMMANDS_DIR`）とグローバル（`~/.little_agent/commands/`）で、名前が衝突した場合はプロジェクトが優先されます。
 
@@ -427,22 +583,29 @@ python -m pytest -q
 
 | ファイル | 対象 |
 | --- | --- |
-| `tests/test_core.py` | Agent loop、multi-step tool loop、stateless性、Structured Output、Skill/Tool読み込み |
+| `tests/test_core.py` | Agent loop、multi-step tool loop、実行の独立性、Structured Output |
+| `tests/test_memory.py` | MemoryStore（File/Null）、ChatSessionの会話継続、auto-learning |
+| `tests/test_launch.py` | 起動モードの引数解釈と、各モードが選ぶMemoryStore |
+| `tests/test_skills.py` | 同梱Skillの読み込み、Skill Tool実行、Skill追加、core非依存の検証 |
+| `tests/test_grant.py` | workspace / allowed_paths の表現と2段階の認可 |
+| `tests/test_a2a.py` | A2Aサーバ/クライアント実HTTP、TextPart/DataPart、cancel、Task非共有、workspace受け渡し、委譲・並列委譲 |
 | `tests/test_schema.py` | 内蔵JSON Schemaバリデータ |
 | `tests/test_agents.py` | Agent Profile（Skill/Tool/委譲の制限、profile解決） |
-| `tests/test_a2a.py` | A2Aサーバ/クライアント実HTTP、TextPart/DataPart、cancel、委譲・並列委譲 |
 | `tests/test_commands.py` | スラッシュコマンド |
 
 ## 拡張方法
 
 **Toolを追加する**: `little_agent/tools` にToolクラスを追加し、`name` / `description` / `parameters` / `requires_confirmation` / `run()` を実装して、`little_agent/tools/__init__.py` の `default_tools()` に登録します。
 
-**Skillを追加する**: `skills/<new_skill>/SKILL.md` を作り、必要なら `tools.json` と `scripts/` を足します。
+**Skillを追加する**: `skills/<new_skill>/SKILL.md` を作り、必要なら `tools.json` と `scripts/` を足します。coreの変更は不要です。
+
+**Memoryの保存先を変える**: `little_agent/memory/store.py` の `MemoryStore` プロトコル（`sections` / `tools` / `learn` / `describe`）を満たすクラスを作り、`build_agent(..., memory=...)` に渡します。Runtime側の変更は要りません。
 
 ## 現在の制限
 
-- A2Aはブロッキング＋ポーリングのみ（`message/stream` のSSEとpush通知は未対応）
+- A2Aはブロッキング＋ポーリングのみ（`message/stream` のSSEとpush通知は意図的に未対応）
 - タスクストアはインメモリ（プロセス再起動で消えます）
 - PowerShell安全ガードは簡易的です
 - Skill選択はキーワードスコアリング（embedding検索やLLM routingは未実装）
+- Web検索Toolはありません（`fetch_url` によるURL取得のみ）
 - Structured Output に失敗したときの自動リトライは行いません（そのまま失敗として返します）

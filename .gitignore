@@ -12,3 +12,8 @@ logs/
 agents/
 
 *.png
+
+# Runtime state written by the agent and its skills, not source.
+data/
+memory.md
+profile.md

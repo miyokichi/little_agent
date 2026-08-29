@@ -1,15 +1,29 @@
-"""The agent loop: one execution, start to finish, with no state carried over.
+"""The agent runtime: one execution of the tool loop, start to finish.
 
-``Agent.run`` is a single independent execution. It builds its messages from the
-instruction, the caller-supplied context, the profile's skills and tools, runs
-the multi-step tool loop, and returns the result. Nothing is remembered between
-runs: the next ``run`` starts from the same system prompt as the first.
+This is the single runtime both front ends share::
+
+                 Agent Runtime
+                 /           \
+              Chat            A2A
+
+``Agent.run`` is one independent execution. It builds its messages from the
+instruction, the caller-supplied context, any conversation ``history`` handed in
+for this run, the profile's skills and tools, runs the multi-step tool loop and
+returns the result. The agent itself keeps nothing between runs — whoever wants
+continuity owns it and passes it back in (that is
+:class:`~little_agent.session.ChatSession` for chat; an A2A task passes nothing,
+so tasks never share context).
+
+Persistence is likewise not the runtime's business: it holds a
+:class:`~little_agent.memory.store.MemoryStore` and asks it for prompt sections
+and tools. With the null store — ``chat --no-memory`` and every A2A task — that
+is nothing at all, and no file is read or written.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +32,7 @@ from little_agent.config import AgentConfig
 from little_agent.control import StopController
 from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
 from little_agent.logging import RunLogger, estimate_tokens
+from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.messages import Message, text_content
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
@@ -65,15 +80,21 @@ class Agent:
         confirm: ConfirmCallback | None = None,
         stop: StopController | None = None,
         core_tools: set[str] | None = None,
+        memory: MemoryStore | None = None,
     ) -> None:
         self.config = config
         self.skills = skills
+        # No store means "remember nothing" — never a silent fallback to disk.
+        self.memory: MemoryStore = memory or NullMemoryStore()
         # ``core_tools`` is a per-agent allowlist for the built-in core tools.
         # Skill script tools are always registered.
         self.tools = tools or default_tools(core_tools)
         for tool in self.skills.load_tools():
             if tool.name not in self.tools.names():
                 self.tools.register(tool)
+        # Memory tools exist only when the store persists something.
+        for tool in self.memory.tools():
+            self.tools.register(tool)
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
         self.stop = stop or StopController(config.stop_hotkey)
@@ -84,6 +105,7 @@ class Agent:
         instruction: str,
         context: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
+        history: Sequence[Message] | None = None,
     ) -> RunResult:
         """Execute one task and return its result.
 
@@ -91,6 +113,12 @@ class Agent:
         only; it is rendered into the prompt and never persisted. When
         ``output_schema`` is given the final answer must be JSON matching it, and
         ``StructuredOutputError`` is raised when it is not.
+
+        ``history`` is earlier conversation the caller wants this run to see. The
+        agent copies it, never mutates it, and keeps nothing afterwards: a caller
+        that wants continuity (chat) owns the transcript and hands it back each
+        turn, and a caller that wants isolation (an A2A task) simply passes
+        nothing.
         """
 
         prompt = self._compose_prompt(instruction, context)
@@ -99,7 +127,13 @@ class Agent:
 
         execution = _Execution()
         selected_skills = self.skills.select_for_text(prompt)
-        execution.messages.append(self._system_prompt(selected_skills, output_schema))
+        execution.messages.append(
+            self._system_prompt(selected_skills, output_schema, conversational=bool(history))
+        )
+        # A system message inside the caller's history would fight the one above.
+        execution.messages.extend(
+            message for message in (history or ()) if message.role != "system"
+        )
         execution.messages.append(Message(role="user", content=prompt))
 
         final = self._loop(execution)
@@ -221,11 +255,18 @@ class Agent:
         self,
         selected_skills: list[Any],
         output_schema: dict[str, Any] | None = None,
+        conversational: bool = False,
     ) -> Message:
         skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
+        opening = (
+            "You are Little Agent. You are in a conversation: earlier turns are above, "
+            "so resolve references against them."
+            if conversational
+            else "You are Little Agent, a task runner. You are given one task, with "
+            "everything you need to do it."
+        )
         content = (
-            "You are Little Agent, a stateless task runner. You are given one task, "
-            "with everything you need to do it. Use tools when they help. Keep actions "
+            f"{opening} Use tools when they help. Keep actions "
             "inside the configured workspace and explicitly allowed paths. "
             "Prefer concise, practical answers.\n\n"
             f"Workspace: {self.config.workspace}\n\n"
@@ -234,6 +275,9 @@ class Agent:
             f"Available tools:\n{self.tools.descriptions()}\n\n"
             f"Relevant skills:\n{skill_text}"
         )
+        # Empty for the null store, so this whole block vanishes without memory.
+        for heading, body in self.memory.sections():
+            content += f"\n\n## {heading}\n{body}"
         if output_schema is not None:
             content += (
                 "\n\n## Required output format\n"
