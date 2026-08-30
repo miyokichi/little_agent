@@ -69,6 +69,12 @@ DEFAULT_PORT = 8800
 AgentFactory = Callable[[int, Any, WorkGrant], Any]
 
 
+def _audit(message: str) -> None:
+    """Emit one bounded A2A lifecycle line without task instructions/content."""
+
+    print(f"[a2a] {message}", flush=True)
+
+
 class TaskStore:
     """In-memory A2A task store with the stop controller for each running task."""
 
@@ -212,6 +218,12 @@ class A2AService:
         grant = self._authorize(WorkGrant.from_metadata(metadata))
 
         task_id = new_id()
+        project_id = str(metadata.get("nexus_seed/project_id") or "unknown")
+        _audit(f"request received task={task_id} project={project_id}")
+        _audit(
+            f"workspace granted task={task_id} requested={grant.workspace is not None} "
+            f"readonly_paths={len(grant.allowed_paths)}"
+        )
         context_id = str(message.get("contextId") or new_id())
         task = new_task(task_id, context_id)
         task["history"] = [message]
@@ -258,6 +270,7 @@ class A2AService:
         stop: "_CancelFlag",
         grant: WorkGrant,
     ) -> None:
+        _audit(f"execution started task={task_id}")
         try:
             agent = self._agent_factory(depth, stop, grant)
             result = agent.run(
@@ -267,6 +280,7 @@ class A2AService:
             )
         except Exception as exc:  # noqa: BLE001 - reported to the peer as a failed task.
             self.tasks.set_state(task_id, TASK_FAILED, f"Agent run failed: {exc}")
+            _audit(f"execution failed task={task_id} error={type(exc).__name__}")
             return
         current = self.tasks.get(task_id) or {}
         if str((current.get("status") or {}).get("state")) == TASK_CANCELED:
@@ -274,6 +288,9 @@ class A2AService:
         self.tasks.set_state(
             task_id, TASK_COMPLETED, artifact=result_artifact(result.text, result.data)
         )
+        _audit(f"execution completed task={task_id}")
+        result_format = "data" if result.data is not None else "text"
+        _audit(f"result ready task={task_id} format={result_format}")
 
     def tasks_get(self, params: dict[str, Any]) -> dict[str, Any]:
         task_id = str(params.get("id") or "")
@@ -366,6 +383,12 @@ def make_handler(service: A2AService):
                 return
             response = service.handle(payload)
             self._send_json(200, response)
+            if payload.get("method") == "message/send" and isinstance(response, dict):
+                result = response.get("result")
+                if isinstance(result, dict):
+                    state = str((result.get("status") or {}).get("state") or "message")
+                    label = "result sent" if state == TASK_COMPLETED else "response sent"
+                    _audit(f"{label} task={result.get('id') or 'none'} state={state}")
 
     return Handler
 
