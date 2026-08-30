@@ -341,7 +341,7 @@ skills/<skill_name>/
 
 Officeファイル系は外部ライブラリなしでOffice Open XMLを扱います（`.xls` / `.ppt` は非対応、読み取りと簡易新規作成が中心）。`screen_capture` は `mss` + `Pillow`、`computer_use` は `pyautogui` が必要です。`project_manager` のビューアは `skills/project_manager/scripts/viewer.py` としてSkillフォルダ内に同梱されています（coreには入っていません）。
 
-`workspace_harness` は `tasks/`（`LITTLE_AGENT_TASKS_DIR`）と `shared/`（`LITTLE_AGENT_SHARED_DIR`）を使います。リポジトリにサンプルが入っています。これらはworkspace側に作られ、無ければ自動生成されます。
+`project_manager` のビューアのポートは `LITTLE_AGENT_VIEWER_PORT`（既定 `8765`）で変えられます。`workspace_harness` は `tasks/`（`LITTLE_AGENT_TASKS_DIR`）と `shared/`（`LITTLE_AGENT_SHARED_DIR`）を使います。リポジトリにサンプルが入っています。これらはworkspace側に作られ、無ければ自動生成されます。
 
 ## Agent Profile
 
