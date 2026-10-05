@@ -2,18 +2,20 @@
 
 Skill と Tool を LLM に与えて仕事を実行する、軽量な Agent Runtime です。
 
-Runtime は**1本**で、その上に **Chat**（人と対話する）と **A2A**（外部システムから1件の仕事を受ける）という2つの入口が載ります。LLM・Tool Loop・Skill実行・Workspace・緊急停止・usage計測は、どちらの入口でも同じコードです。
+Runtime は**1本**で、その上に **Chat**（人と対話する）、**A2A**（外部システムから1件の仕事を受ける）、**MCP**（MCPホストからToolとして呼ばれる）という3つの入口が載ります。LLM・Tool Loop・Skill実行・Workspace・緊急停止・usage計測は、どの入口でも同じコードです。
 
 ```text
-                    Agent Runtime
-                    （LLM / Tool Loop / Skill / Workspace
-                      / cancellation / usage）
-                     /                    \
-                  Chat                     A2A
-        little-agent chat          little-agent serve-a2a
-                  │                          │
-       会話履歴あり／永続memory可      Taskごとに独立・永続memoryなし
+                         Agent Runtime
+                （LLM / Tool Loop / Skill / Workspace
+                  / MCP client / cancellation / usage）
+                 /               |                \
+              Chat              A2A               MCP
+   little-agent chat   little-agent serve-a2a   little-agent serve-mcp
+         │                       │                    │
+ 会話履歴あり／永続memory可   Taskごとに独立      呼び出しごとに独立
 ```
+
+さらに Runtime 自身が **MCPクライアント**でもあり、`mcp.json` に書いたMCPサーバのTool・Resource・Promptをエージェントが使えます（[MCP](#mcpmodel-context-protocol)）。
 
 構成は6つの領域に分かれます。
 
@@ -25,6 +27,7 @@ Runtime は**1本**で、その上に **Chat**（人と対話する）と **A2A*
 | **Memory** | `little_agent/memory/` | 永続memoryの抽象。Runtimeとは疎結合 |
 | **Workspace** | `little_agent/tools/base.py`, `paths.py`, `a2a/grant.py` | 読み書きできる範囲の決定と検証 |
 | **Skills** | `little_agent/skills/`（loader）, `little_agent/builtin_skills/`（実装） | Skill定義とSkill Tool。coreから分離 |
+| **MCP** | `little_agent/mcp/` | MCPクライアント（外部サーバのTool/Resource/Prompt）と `serve-mcp` |
 
 Runtime 自身は実行の間に何も持ち越しません。会話を続けたい側（Chat）が履歴を保持して渡し、独立させたい側（A2A）は何も渡しません。
 
@@ -63,6 +66,7 @@ LITTLE_AGENT_MODEL=local-model-name
 little-agent chat                                   # 対話。永続memoryあり
 little-agent chat --no-memory                       # 対話。永続memoryなし
 little-agent serve-a2a --agent observer --port 8801 # A2Aサーバとして公開
+little-agent serve-mcp --agent observer             # MCPサーバ（stdio）として公開
 ```
 
 引数なしの `little-agent` は `chat` として起動します（`python -m little_agent` / `python main.py` も同じ）。
@@ -72,6 +76,7 @@ little-agent serve-a2a --agent observer --port 8801 # A2Aサーバとして公�
 | `chat` | セッション中は保持 | `FileMemoryStore`（読み書きする） | 会話として連続 |
 | `chat --no-memory` | セッション中は保持 | `NullMemoryStore`（一切触らない） | 会話として連続 |
 | `serve-a2a` | 持たない | `NullMemoryStore`（一切触らない） | Taskごとに完全独立 |
+| `serve-mcp` | 持たない | `NullMemoryStore`（一切触らない） | `tools/call` ごとに完全独立 |
 
 `--no-memory` は「保存を我慢する」モードではありません。`NullMemoryStore` が入るため、memoryファイルは**開かれもせず**、`update_workspace_memory` / `update_global_memory` Tool はそもそも存在しません。A2Aサーバも同じで、誰かの永続memoryを読み書きすることはありません。
 
@@ -83,7 +88,7 @@ little-agent serve-a2a --agent observer --port 8801 # A2Aサーバとして公�
 | `--readable-path <PATH>` | ワークスペース外で**読める**パスを追加（繰り返し可）。A2Aで参照用に渡せる範囲でもある |
 | `--writable-path <PATH>` | ワークスペース外で**読み書きできる**パスを追加（繰り返し可）。A2Aで作業場所として渡せる範囲でもある |
 
-`serve-a2a` のみ: `--host`、`--port`、`--auto-approve`、`--allow-any-path`。
+`serve-a2a` のみ: `--host`、`--port`、`--auto-approve`、`--allow-any-path`。`serve-mcp` は `--auto-approve`、`--allow-any-path` を受け付けます。
 
 ## Agent execution
 
@@ -203,6 +208,8 @@ Core Tool:
 | `delegate_tasks` | 独立した複数サブタスクをA2Aで**並列**委譲 | 必要 |
 
 memory ONのchatではこれに `update_workspace_memory` / `update_global_memory` が加わります（MemoryStoreが供給するので、他のモードには存在しません）。
+
+MCPサーバが設定されていれば、そのToolが `mcp__<server>__<tool>` として、Resourceを持つサーバがあれば `list_mcp_resources` / `read_mcp_resource` が加わります（[MCP](#mcpmodel-context-protocol)）。
 
 どのCore Toolを使えるかは Agent Profile の `core_tools` で絞れます（`delegate_task` / `delegate_tasks` も対象）。
 
@@ -369,15 +376,17 @@ agents/                     # 各エージェント（.gitignore 対象。運用
   "skills": ["datetime", "file_manager"],
   "core_tools": ["read_file", "list_dir"],
   "max_tool_steps": null,
-  "require_confirmation": null
+  "require_confirmation": null,
+  "mcp_servers": ["filesystem"]
 }
 ```
 
 - `skills` … ライブラリ（上の探索順序で決まる場所）から名前で選ぶ。省略した場合は `agents/<name>/skills/` に置いたフォルダがそのまま有効になります。両方ある場合はエージェント自身のフォルダが優先されます。
 - `core_tools` … Core Toolの許可リスト。省略で全Core Tool有効。`delegate_task` / `delegate_tasks` もこのリストで制御できるので、**委譲機能はRuntimeに常に存在し、使わせるかはProfileが決める**構成になります。
+- `mcp_servers` … `mcp.json` で定義したMCPサーバのうち、このエージェントが使ってよいものの名前。**省略すると使いません**（MCPサーバはワークスペースの外に手が届くので、プロファイルごとに明示的にopt-inします）。
 - `description` と有効なSkillは、A2A Agent Card の説明・`skills` としてそのまま公開されます。
 
-組み込みの `default` エージェント（予約名。`library` / `none` / `-` も同義）はライブラリ全体＋全Core Toolを意味します。何も指定しなければこれで動きます。
+組み込みの `default` エージェント（予約名。`library` / `none` / `-` も同義）はライブラリ全体＋全Core Tool＋`mcp.json` の全MCPサーバを意味します。何も指定しなければこれで動きます。
 
 エージェント名は `LITTLE_AGENT_AGENT` または `--agent <name>` で選びます。
 
@@ -538,6 +547,112 @@ Core Tool の `delegate_task`（1件）と `delegate_tasks`（複数を並列）
 
 委譲の深さは message の metadata（`littleAgent/delegationDepth`）で相手に伝わり、無限の連鎖を防ぎます。`LITTLE_AGENT_MAX_DELEGATION_DEPTH`（既定 `2`、`0` で委譲を無効化）で調整します。委譲待ちの間に緊急停止ホットキーを押すと、待機を打ち切って相手のタスクを `tasks/cancel` で取り消します。
 
+## MCP（Model Context Protocol）
+
+Little Agent は MCP の**クライアント**と**サーバ**の両方になれます。A2A と同じく標準ライブラリだけで実装しています（MCP SDK 不使用）。
+
+| 対応範囲 | 内容 |
+| --- | --- |
+| プロトコル版 | `2025-06-18`（`2025-03-26` / `2024-11-05` のサーバとも接続可） |
+| トランスポート | stdio（子プロセス）、Streamable HTTP（JSON応答 / SSE応答、`Mcp-Session-Id`） |
+| クライアント機能 | Tools（ページング、text / image / resource / structuredContent / isError）、Resources（list / templates / read）、Prompts（list / get）、Roots（workspace と許可パスを返す）、ping、`notifications/tools/list_changed`、タイムアウト時の `notifications/cancelled` |
+| 未対応 | Sampling、Elicitation（capabilityを宣言しないので、準拠サーバは要求してきません）、HTTPのGETによるサーバ発ストリーム、OAuth認可フロー（`headers` で静的トークンを渡す形のみ） |
+
+### MCPサーバを使う（mcp.json）
+
+`mcp.json` に MCP サーバを書くと、起動時に接続してそのToolをエージェントに渡します。書式は Claude Desktop / Claude Code / Cursor などと共通の `mcpServers` 形式なので、定義をそのまま持ってこられます。
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\projects"]
+    },
+    "issues": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer ${ISSUES_TOKEN}"},
+      "require_confirmation": false,
+      "tools": ["search_issues", "get_issue"]
+    }
+  }
+}
+```
+
+| キー | 内容 |
+| --- | --- |
+| `command` / `args` / `env` / `cwd` | stdioサーバ。子プロセスとして起動（`cwd` 既定はワークスペース）。`npx` などは PATH から解決（Windowsの `npx.cmd` も可） |
+| `url` / `headers` | Streamable HTTPサーバ |
+| `require_confirmation` | Tool実行前に確認するか（既定 `true`） |
+| `tools` | 公開するTool名の許可リスト（省略で全部） |
+| `disabled` | 定義を残したまま起動しない |
+| `timeout` | 1リクエストの待ち時間（秒、既定 `60`） |
+
+- `args` / `env` / `headers` / `url` / `cwd` の `${NAME}` は環境変数で置き換えます。秘密情報をファイルに書かずに済みます。
+- 読む場所は `~/.little_agent/mcp.json`（`LITTLE_AGENT_GLOBAL_MCP_CONFIG`）→ `<workspace>/mcp.json`（`LITTLE_AGENT_MCP_CONFIG`）の順で、同じ名前はワークスペース側が勝ちます。
+- 接続はプロセス内で共有されます。chat の各ターン、`/agent` の切り替え、A2Aの各Taskが同じ接続を使い、終了時に閉じます（stdioサーバは停止）。
+- 起動に失敗したサーバは起動時に警告して除外し、エージェント自体はそのまま動きます。
+
+エージェントから見ると:
+
+- 各Toolは `mcp__<server>__<tool>` という名前のToolになります（説明の先頭に `[MCP <server>]`）。Tool名が衝突することはありません。
+- Resourceを持つサーバがあると `list_mcp_resources`（一覧）と `read_mcp_resource`（URI指定で読む）が加わります。画像は Vision 対応モデルにそのまま渡ります。
+- サーバが `initialize` で返した `instructions` は system prompt に入ります。
+- サーバが `tools/list_changed` を通知すると、次の実行の前にTool一覧を取り直します。
+- サーバから `roots/list` を聞かれると、ワークスペースと許可パスを `file://` URI で答えます。
+
+**MCPサーバはワークスペースの外にあります。** サーバが何に触れるかはサーバ自身とその起動方法が決めることで、Little Agent のパス制限は及びません。そのため:
+
+- MCP Tool は既定で**実行前に確認**します（`require_confirmation: false` で外せます）。A2A / `serve-mcp` では、確認が必要なToolは `--auto-approve` が無い限り拒否されます。
+- 名前付きの Agent Profile は `mcp_servers` に書いたサーバしか使えません（`default` エージェントは全サーバ）。
+
+chat では `/mcp` で状態を確認できます。
+
+| コマンド | 動作 |
+| --- | --- |
+| `/mcp` | サーバ一覧（状態・トランスポート・Tool数・エラー） |
+| `/mcp tools [server]` | MCP Tool の一覧 |
+| `/mcp resources [server]` | Resource / Resource Template の一覧 |
+| `/mcp prompts [server]` | Prompt の一覧と引数 |
+| `/mcp prompt <server> <name> [key=value ...]` | MCP Prompt を取得して、その内容をエージェントに送る |
+| `/mcp reconnect <server>` | サーバに接続し直す（失敗したサーバの再試行にも） |
+
+### MCPサーバとして公開する（serve-mcp）
+
+```powershell
+little-agent serve-mcp --agent office
+```
+
+エージェント自身を stdio の MCP サーバとして公開します。Claude Desktop / Claude Code / IDE など任意の MCP ホストから、ほかのToolと同じように仕事を渡せます。
+
+```json
+{
+  "mcpServers": {
+    "office": {
+      "command": "little-agent",
+      "args": ["serve-mcp", "--agent", "office"],
+      "env": {"LITTLE_AGENT_WORKSPACE": "D:\\work"}
+    }
+  }
+}
+```
+
+公開されるToolは `run_task` の1つです。
+
+| 引数 | 内容 |
+| --- | --- |
+| `instruction` | 必須。完結した指示 |
+| `context` | 任意。この呼び出し用の構造化データ |
+| `output_schema` | 任意。JSON Schema。指定すると検証済みJSONが `structuredContent` で返ります |
+| `workspace` | 任意。この呼び出しで作業する（読み書きする）ディレクトリ |
+| `allowed_paths` | 任意。ワークスペース外で**読んで**よいパスの配列 |
+
+- A2Aと同じく、呼び出しごとに新しいエージェントを作り、履歴を渡さず、`NullMemoryStore` を与えます。呼び出し間でコンテキストも記憶も共有しません。
+- `workspace` / `allowed_paths` は A2A の [workspace / allowed_paths](#ワークの受け渡し先を指定するworkspace--allowed_paths) と同じ検査（書き込み可能範囲／読み取り可能範囲）を通ります。外れていればTool エラーになります。
+- 確認が必要なToolは既定で拒否します（`--auto-approve` / `LITTLE_AGENT_MCP_AUTO_APPROVE=true` で許可）。検査を外す `--allow-any-path` / `LITTLE_AGENT_MCP_ALLOW_ANY_PATH` もあります。
+- `notifications/cancelled` を受けると、その呼び出しのエージェントを Tool 実行の合間で止めます。
+- stdout はプロトコル専用です。Runtime が出すそのほかの表示はすべて stderr に回ります。
+
 ## セットアップ
 
 ```powershell
@@ -582,6 +697,7 @@ little-agent chat --no-memory
 | `/remember` | | いまの会話から恒久memoryを抽出して保存 |
 | `/agents` | | エージェントプロファイルを一覧（アクティブは `*`） |
 | `/agent` | | アクティブなエージェントを表示 / `/agent <name>` で切替 |
+| `/mcp` | | MCPサーバ・Tool・Resource・Promptの確認、Promptの実行（[詳細](#mcpサーバを使うmcpjson)） |
 
 `/agent` で切り替えても**会話は続きます**。切り替わるのは能力（Skill/Tool）であって、話している相手の記憶ではありません。
 
@@ -634,12 +750,15 @@ python -m pytest -q
 | `tests/test_agents.py` | Agent Profile（Skill/Tool/委譲の制限、profile解決） |
 | `tests/test_commands.py` | スラッシュコマンド |
 | `tests/test_workspace_harness.py` | `workspace_harness` Skillのタスクフォルダ操作 |
+| `tests/test_mcp.py` | mcp.json、MCPクライアント（stdio実プロセス / Streamable HTTPのJSON・SSE）、Tool/Resource/Prompt、Profile選択、`/mcp`、`serve-mcp`（実プロセスでのクライアント↔サーバ往復を含む） |
 
 ## 拡張方法
 
 **Toolを追加する**: `little_agent/tools` にToolクラスを追加し、`name` / `description` / `parameters` / `requires_confirmation` / `run()` を実装して、`little_agent/tools/__init__.py` の `default_tools()` に登録します。
 
 **Skillを追加する**: Skillライブラリに `<new_skill>/SKILL.md` を作り、必要なら `tools.json` と `scripts/` を足します。coreの変更は不要です。自分のプロジェクトだけで使うなら `<workspace>/skills/` に、同梱として配りたいなら `little_agent/builtin_skills/` に置きます。
+
+**外部のToolをつなぐ**: MCPサーバなら `mcp.json` に書くだけです。coreもSkillも変更不要です。
 
 **Memoryの保存先を変える**: `little_agent/memory/store.py` の `MemoryStore` プロトコル（`sections` / `tools` / `learn` / `describe`）を満たすクラスを作り、`build_agent(..., memory=...)` に渡します。Runtime側の変更は要りません。
 

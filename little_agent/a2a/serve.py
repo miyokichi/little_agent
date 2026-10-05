@@ -193,6 +193,15 @@ def run(args: argparse.Namespace) -> None:
         print(f"Grantable as a workspace (read+write): {writable or '(workspace only)'}")
         print(f"Grantable as an allowed path (read):   {readable or '(workspace only)'}")
     print("Memory: off (each task is independent; nothing is persisted)")
+    if config.mcp_config_paths:
+        from little_agent.mcp.manager import shared_manager
+
+        # Connect now so a broken server shows up in the banner, not mid-task.
+        view = shared_manager(config).view(profile.mcp_selection())
+        if view.states or view.missing:
+            print(f"MCP: {view.describe()}")
+        for line in view.warnings():
+            print(line)
     print("Ctrl+C to stop.")
     # A server's stdout is usually a pipe, and a pipe is block-buffered: without
     # this the banner (and any skill-library warning above it) would sit unseen

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from little_agent import schema as json_schema
 from little_agent.config import AgentConfig
@@ -37,6 +37,9 @@ from little_agent.messages import Message, text_content
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
+
+if TYPE_CHECKING:
+    from little_agent.mcp.manager import McpView
 
 
 ConfirmCallback = Callable[[str, dict[str, Any]], bool]
@@ -81,6 +84,7 @@ class Agent:
         stop: StopController | None = None,
         core_tools: set[str] | None = None,
         memory: MemoryStore | None = None,
+        mcp: "McpView | None" = None,
     ) -> None:
         self.config = config
         self.skills = skills
@@ -95,6 +99,11 @@ class Agent:
         # Memory tools exist only when the store persists something.
         for tool in self.memory.tools():
             self.tools.register(tool)
+        # MCP servers selected by the profile: their tools, plus the generic
+        # resource tools when any of them offers resources.
+        self.mcp = mcp
+        self._mcp_tool_names: list[str] = []
+        self._register_mcp_tools()
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
         self.stop = stop or StopController(config.stop_hotkey)
@@ -121,6 +130,8 @@ class Agent:
         nothing.
         """
 
+        if self.mcp is not None and self.mcp.refresh():
+            self._register_mcp_tools()
         prompt = self._compose_prompt(instruction, context)
         if self.logger:
             self.logger.log_conversation("user_message", content=prompt)
@@ -278,6 +289,8 @@ class Agent:
         # Empty for the null store, so this whole block vanishes without memory.
         for heading, body in self.memory.sections():
             content += f"\n\n## {heading}\n{body}"
+        for heading, body in self.mcp.sections() if self.mcp is not None else ():
+            content += f"\n\n## {heading}\n{body}"
         if output_schema is not None:
             content += (
                 "\n\n## Required output format\n"
@@ -288,6 +301,17 @@ class Agent:
         return Message(role="system", content=content)
 
     # --- tools ---------------------------------------------------------------
+
+    def _register_mcp_tools(self) -> None:
+        for name in self._mcp_tool_names:
+            self.tools.unregister(name)
+        self._mcp_tool_names = []
+        if self.mcp is None:
+            return
+        for tool in self.mcp.tools():
+            if tool.name not in self.tools.names():
+                self.tools.register(tool)
+                self._mcp_tool_names.append(tool.name)
 
     def _run_tool(
         self, execution: _Execution, name: str, arguments: dict[str, Any]
