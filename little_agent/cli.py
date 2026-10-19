@@ -83,6 +83,19 @@ def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> age
     return agents.default_profile(config)
 
 
+def describe_tool_dirs(config: AgentConfig) -> str:
+    """The tool directories that exist, labelled, in override order."""
+
+    from little_agent.tools.loader import origin_label
+
+    present = [
+        f"{path} ({origin_label(path, config.workspace)})"
+        for path in config.tool_dirs
+        if path.is_dir()
+    ]
+    return ", ".join(present) or "(no tool directories)"
+
+
 def build_memory_store(config: AgentConfig, enabled: bool) -> MemoryStore:
     """The store a chat session runs with.
 
@@ -129,7 +142,10 @@ def chat(args: argparse.Namespace) -> None:
     print(f"Memory: {memory.describe()}")
     if agent.mcp is not None:
         print(f"MCP: {agent.mcp.describe()}")
+    print(f"Tools: {describe_tool_dirs(config)}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
+    for error in agent.tools.load_errors:
+        print(f"[tools] skipped {error}")
     warning = agent.skills.warning()
     if warning:
         print(warning)

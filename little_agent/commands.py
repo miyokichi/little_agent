@@ -279,13 +279,45 @@ def _cmd_skills(ctx: CommandContext, args: str) -> DispatchResult:
     return DispatchResult(output="\n".join(lines))
 
 
+def _tool_origin(tool: object) -> str:
+    """Where a tool comes from: a tool file's directory, or the runtime part."""
+
+    origin = getattr(tool, "origin", None)
+    if origin:
+        return origin
+    name = getattr(tool, "name", "")
+    if name.startswith("mcp__") or name.endswith("_mcp_resource") or name.endswith("_mcp_resources"):
+        return "mcp"
+    if hasattr(tool, "script_path"):
+        return "skill"
+    return "runtime"
+
+
 def _cmd_tools(ctx: CommandContext, args: str) -> DispatchResult:
+    wanted = args.strip()
+    if wanted:
+        if wanted not in ctx.agent.tools.names():
+            return DispatchResult(output=f"Unknown tool: {wanted}")
+        tool = ctx.agent.tools.get(wanted)
+        import json
+
+        lines = [
+            f"{tool.name}  [{_tool_origin(tool)}]",
+            f"  {tool.description}",
+            f"  confirmation: {'required' if tool.requires_confirmation else 'not required'}",
+        ]
+        source = getattr(tool, "source", None)
+        if source:
+            lines.append(f"  source: {source}")
+        lines.append("  parameters: " + json.dumps(tool.parameters, ensure_ascii=False, indent=2).replace("\n", "\n  "))
+        return DispatchResult(output="\n".join(lines))
     names = ctx.agent.tools.names()
     lines = [f"Registered tools ({len(names)}):"]
     for name in names:
         tool = ctx.agent.tools.get(name)
         flag = " (confirm)" if getattr(tool, "requires_confirmation", False) else ""
-        lines.append(f"  {name:<22} {_first_line(tool.description)}{flag}")
+        lines.append(f"  {name:<22} {_first_line(tool.description)}{flag}  [{_tool_origin(tool)}]")
+    lines.append("Use /tools <name> for parameters and source.")
     return DispatchResult(output="\n".join(lines))
 
 
@@ -329,7 +361,23 @@ def _cmd_config(ctx: CommandContext, args: str) -> DispatchResult:
 
 def _cmd_reload(ctx: CommandContext, args: str) -> DispatchResult:
     count = ctx.registry.reload_custom()
-    return DispatchResult(output=f"Reloaded custom commands ({count} found). Skills reload automatically each turn.")
+    lines = [f"Reloaded custom commands ({count} found)."]
+    if ctx.activate is not None and ctx.active_agent:
+        # Rebuilding the agent re-reads the tool directories; files that changed
+        # are imported again. The conversation carries on.
+        before = set(ctx.agent.tools.names())
+        ctx.activate(ctx.active_agent)
+        after = set(ctx.agent.tools.names())
+        added, removed = sorted(after - before), sorted(before - after)
+        lines.append(f"Reloaded tools ({len(after)} registered).")
+        if added:
+            lines.append(f"  added  : {', '.join(added)}")
+        if removed:
+            lines.append(f"  removed: {', '.join(removed)}")
+        for error in ctx.agent.tools.load_errors:
+            lines.append(f"  skipped: {error}")
+    lines.append("Skills reload automatically each turn.")
+    return DispatchResult(output="\n".join(lines))
 
 
 def _paths_text(paths: tuple[Path, ...]) -> str:
@@ -535,10 +583,10 @@ def _builtin_commands() -> list[BuiltinCommand]:
         BuiltinCommand("help", "List available commands.", _cmd_help, aliases=("?",)),
         BuiltinCommand("exit", "Quit the session.", _cmd_exit, aliases=("quit",)),
         BuiltinCommand("skills", "List loaded skills (/skills <name> for detail).", _cmd_skills),
-        BuiltinCommand("tools", "List registered tools.", _cmd_tools),
+        BuiltinCommand("tools", "List registered tools (/tools <name> for detail).", _cmd_tools),
         BuiltinCommand("usage", "Show this session's token usage.", _cmd_usage),
         BuiltinCommand("config", "Show the current configuration.", _cmd_config),
-        BuiltinCommand("reload", "Reload custom commands from disk.", _cmd_reload),
+        BuiltinCommand("reload", "Reload custom commands and tool files from disk.", _cmd_reload),
         BuiltinCommand("clear", "Clear the conversation (persistent memory is kept).", _cmd_clear),
         BuiltinCommand("memory", "Show what persistent memory holds.", _cmd_memory),
         BuiltinCommand(

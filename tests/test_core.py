@@ -260,9 +260,7 @@ class SkillAndToolTests(unittest.TestCase):
         self.assertFalse(move_missing.ok)
 
     def test_fetch_url_rejects_non_http_scheme(self) -> None:
-        from little_agent.tools.web import FetchUrlTool
-
-        result = FetchUrlTool().run(ToolContext(workspace=Path.cwd()), url="ftp://example.com")
+        result = default_tools().get("fetch_url").run(ToolContext(workspace=Path.cwd()), url="ftp://example.com")
 
         self.assertFalse(result.ok)
         self.assertIn("http(s)", result.content)

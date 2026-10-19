@@ -31,7 +31,7 @@ little-agent = "little_agent.cli:main"
 include = ["little_agent*"]
 exclude = ["tests*"]
 
-# The built-in skill library ships with the code: skills are a runtime resource,
+# The built-in skill library and the built-in tool files ship with the code: skills are a runtime resource,
 # so a normal `pip install` must carry them, not just an editable checkout.
 # Skill folders are data, not Python packages, so they are declared here rather
 # than found by packages.find.
@@ -40,6 +40,7 @@ little_agent = [
   "builtin_skills/*/SKILL.md",
   "builtin_skills/*/tools.json",
   "builtin_skills/*/scripts/*",
+  "builtin_tools/*.py",
 ]
 
 [build-system]

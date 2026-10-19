@@ -25,6 +25,7 @@ Runtime は**1本**で、その上に **Chat**（人と対話する）、**A2A**
 | **Chat** | `little_agent/session.py`, `cli.py`, `commands.py` | 会話履歴を持ち、毎ターン Runtime に渡す |
 | **A2A** | `little_agent/a2a/` | Agent Card・JSON-RPC・Task・workspace grant |
 | **Memory** | `little_agent/memory/` | 永続memoryの抽象。Runtimeとは疎結合 |
+| **Tools** | `little_agent/tools/`（`@tool` と loader）, `little_agent/builtin_tools/`（同梱Tool） | Python関数として書いたToolの読み込み。ファイルの追加・削除で増減 |
 | **Workspace** | `little_agent/tools/base.py`, `paths.py`, `a2a/grant.py` | 読み書きできる範囲の決定と検証 |
 | **Skills** | `little_agent/skills/`（loader）, `little_agent/builtin_skills/`（実装） | Skill定義とSkill Tool。coreから分離 |
 | **MCP** | `little_agent/mcp/` | MCPクライアント（外部サーバのTool/Resource/Prompt）と `serve-mcp` |
@@ -184,15 +185,63 @@ writable  = workspace + LITTLE_AGENT_WRITABLE_PATHS
 
 ## Tool仕様
 
-Toolは `little_agent/tools` に実装します。各Toolは次の属性とメソッドを持ちます。
+Core Tool は **`@tool` を付けたただのPython関数**です。ハーネスに組み込まれているのではなく、Toolディレクトリに置いた `.py` ファイルから起動時に読み込まれます。ファイルを足せばToolが増え、消せば無くなります。coreの変更も登録作業も要りません。
 
-- `name`: Tool名
-- `description`: LLMに渡す説明
-- `parameters`: JSON Schema形式の引数定義
-- `requires_confirmation`: 実行前確認が必要か
-- `run(context, **kwargs)`: Tool実行本体
+```python
+# <workspace>/tools/invoice.py
+from little_agent.tools import ToolContext, ToolError, tool
 
-Core Tool:
+
+@tool(requires_confirmation=True)
+def save_invoice(context: ToolContext, customer: str, amount: int, note: str = "") -> str:
+    """請求書をテキストで保存する。
+
+    Args:
+        customer: 宛先の会社名。
+        amount: 金額（円）。
+        note: 備考（任意）。
+    """
+    if amount <= 0:
+        raise ToolError("amount は正の数にしてください")
+    path = context.path_policy.resolve(f"invoices/{customer}.txt", access="write")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{customer}\n{amount:,}円\n{note}", encoding="utf-8")
+    return f"保存しました: {path.name}"
+```
+
+関数からToolの定義が決まります。
+
+| Toolの項目 | 関数のどこから来るか |
+| --- | --- |
+| `name` | 関数名（`@tool(name="...")` で変更可。`[A-Za-z0-9_-]` で64文字まで） |
+| `description` | docstringの最初の段落（`@tool(description="...")` でも可） |
+| `parameters` | 引数の型ヒントからJSON Schemaを生成。デフォルト値があれば任意、無ければ必須。各引数の説明はdocstringの `Args:` 節（`:param x:` 形式や `Annotated[str, "説明"]` も可） |
+| `requires_confirmation` | `@tool(requires_confirmation=True)`（既定は `False`）。書き込み・削除・実行・ネットワークを伴うものは `True` に |
+
+- 使える型: `str` `int` `float` `bool` `list[X]` `dict[str, X]` `Literal[...]`（enum）`X | None` / `Optional[X]` `Path`（文字列として）。型ヒントの無い引数は何でも受けます。`**kwargs` を取ると未定義の引数も受け付けます。
+- 型が `ToolContext` の引数（または `context` という名前の引数）にはワークスペースと許可パスが渡されます。モデルには見えません。**ファイルに触るときは必ず `context.path_policy.resolve(...)` を通してください**。これでワークスペースの外には出られません。
+- 戻り値: `str` はそのまま、`dict` / `list` はJSON、`None` は成功だけ、`ToolResult` はそのまま（画像を返すときはこれで `images` を渡す）。
+- 失敗は `raise ToolError("理由")` で。メッセージがそのままモデルに返ります。それ以外の例外も `Tool failed: ...` としてモデルに返り、エージェントは止まりません。
+- 実行前に引数をschemaで検証します（`"30"` → `30` のような軽い型変換だけは行います）。形が違えば関数は呼ばれず、何が違うかがモデルに返ります。
+- 関数は普通に呼べるままなので、`save_invoice(ctx, "A社", 1000)` のようにテストできます。
+
+### Toolディレクトリ
+
+```text
+1. little_agent/builtin_tools/   … 同梱Tool（下の表）
+2. ~/.little_agent/tools/        … 自分用。どのワークスペースでも有効
+3. <workspace>/tools/            … このプロジェクト用
+4. LITTLE_AGENT_TOOL_DIRS        … 追加のディレクトリ（区切りは ; / :）
+```
+
+- この順に読み、**同じ名前は後のものが勝ちます**。たとえば `<workspace>/tools/read_file.py` に `read_file` を書けば同梱版を置き換えられます。
+- `_` で始まるファイルは読み込みません（共通の補助関数を置く場所に）。
+- 読み込みに失敗したファイルは起動時に `[tools] skipped ...` と表示して飛ばします。ほかのToolには影響しません。
+- **Toolを外す**: 自分で足したToolはファイルを消すだけです。同梱Toolは `LITTLE_AGENT_DISABLED_TOOLS=run_powershell,fetch_url` で外し、`LITTLE_AGENT_BUILTIN_TOOLS=false` にすると同梱Toolを丸ごと使いません。エージェントごとに絞るなら Agent Profile の `core_tools` です。
+- chat で `/reload` するとToolファイルを読み直し、増えた／消えたToolを表示します（会話は続きます）。`/tools` は各Toolの出どころ（`built-in` / `global` / `workspace` / `configured` / `skill` / `mcp` / `runtime`）を、`/tools <name>` は引数schemaとファイルの場所を表示します。
+- Toolファイルは**Pythonコードとしてそのまま実行されます**。信頼できるファイルだけを置いてください。Toolディレクトリは起動時の設定で決まり、A2Aでほかのワークスペースを渡されても変わりません。
+
+同梱Tool（`little_agent/builtin_tools/` の `filesystem.py` / `shell.py` / `web.py`）と、Runtimeが用意するTool:
 
 | Tool | 内容 | 確認 |
 | --- | --- | --- |
@@ -203,11 +252,11 @@ Core Tool:
 | `move_file` / `delete_file` | ファイルの移動・削除 | 必要 |
 | `search_files` | 文字列検索 | 不要 |
 | `run_powershell` | PowerShellコマンドを実行 | 必要 |
-| `fetch_url` | http(s) URLの取得 | 不要 |
+| `fetch_url` | http(s) URLの取得 | 必要 |
 | `delegate_task` | サブタスク1件をA2Aで別のエージェントに委譲 | 必要 |
 | `delegate_tasks` | 独立した複数サブタスクをA2Aで**並列**委譲 | 必要 |
 
-memory ONのchatではこれに `update_workspace_memory` / `update_global_memory` が加わります（MemoryStoreが供給するので、他のモードには存在しません）。
+`delegate_task` / `delegate_tasks` はRuntimeの状態（委譲の深さや緊急停止）を使うので、ファイルではなくRuntimeが用意します。memory ONのchatではこれに `update_workspace_memory` / `update_global_memory` が加わります（MemoryStoreが供給するので、他のモードには存在しません）。
 
 MCPサーバが設定されていれば、そのToolが `mcp__<server>__<tool>` として、Resourceを持つサーバがあれば `list_mcp_resources` / `read_mcp_resource` が加わります（[MCP](#mcpmodel-context-protocol)）。
 
@@ -688,10 +737,10 @@ little-agent chat --no-memory
 | `/help` | `/?` | 全コマンドを説明付きで一覧 |
 | `/exit` | `/quit` | セッション終了（memory ONならここで auto-learning が走る） |
 | `/skills` | | 読み込み済みSkillを一覧（`/skills <name>` で詳細） |
-| `/tools` | | 登録済みToolを一覧 |
+| `/tools` | | 登録済みToolを一覧（`/tools <name>` で引数と出どころ） |
 | `/usage` | | 当セッションのtoken累計を表示 |
 | `/config` | | model・workspace・memory状態などの設定を表示 |
-| `/reload` | | `commands/*.md` を再読込 |
+| `/reload` | | `commands/*.md` とToolファイルを再読込 |
 | `/clear` | | 会話をリセット（永続memoryは消しません） |
 | `/memory` | | 永続memoryの内容を表示（OFFならその旨を表示） |
 | `/remember` | | いまの会話から恒久memoryを抽出して保存 |
@@ -750,11 +799,12 @@ python -m pytest -q
 | `tests/test_agents.py` | Agent Profile（Skill/Tool/委譲の制限、profile解決） |
 | `tests/test_commands.py` | スラッシュコマンド |
 | `tests/test_workspace_harness.py` | `workspace_harness` Skillのタスクフォルダ操作 |
+| `tests/test_function_tools.py` | `@tool` からのschema生成、引数検証、戻り値の変換、Toolディレクトリの読み込み・上書き・無効化・再読込、`/reload` と `/tools` |
 | `tests/test_mcp.py` | mcp.json、MCPクライアント（stdio実プロセス / Streamable HTTPのJSON・SSE）、Tool/Resource/Prompt、Profile選択、`/mcp`、`serve-mcp`（実プロセスでのクライアント↔サーバ往復を含む） |
 
 ## 拡張方法
 
-**Toolを追加する**: `little_agent/tools` にToolクラスを追加し、`name` / `description` / `parameters` / `requires_confirmation` / `run()` を実装して、`little_agent/tools/__init__.py` の `default_tools()` に登録します。
+**Toolを追加する**: `@tool` を付けた関数を `<workspace>/tools/*.py`（または `~/.little_agent/tools/`）に書くだけです（[Tool仕様](#tool仕様)）。同梱したいものは `little_agent/builtin_tools/` に置きます。
 
 **Skillを追加する**: Skillライブラリに `<new_skill>/SKILL.md` を作り、必要なら `tools.json` と `scripts/` を足します。coreの変更は不要です。自分のプロジェクトだけで使うなら `<workspace>/skills/` に、同梱として配りたいなら `little_agent/builtin_skills/` に置きます。
 

@@ -92,7 +92,12 @@ class Agent:
         self.memory: MemoryStore = memory or NullMemoryStore()
         # ``core_tools`` is a per-agent allowlist for the built-in core tools.
         # Skill script tools are always registered.
-        self.tools = tools or default_tools(core_tools)
+        self.tools = tools or default_tools(
+            core_tools,
+            directories=config.tool_dirs,
+            disabled=config.disabled_tools,
+            workspace=config.workspace,
+        )
         for tool in self.skills.load_tools():
             if tool.name not in self.tools.names():
                 self.tools.register(tool)

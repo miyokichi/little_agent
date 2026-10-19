@@ -179,6 +179,10 @@ def run(args: argparse.Namespace) -> None:
     print(f"Confirmation-required tools: {'auto-approved' if auto_approve else 'denied'}")
     print(f"Workspace: {config.workspace}")
     print(f"Skills: {describe_skill_library(config)}")
+    from little_agent.tools.loader import load_function_tools
+
+    for error in load_function_tools(config.tool_dirs, config.workspace).errors:
+        print(f"[tools] skipped {error}")
     warning = SkillLoader(
         [root.resolve() for root in profile.skill_roots()], names=profile.skill_names()
     ).warning()

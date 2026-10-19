@@ -100,6 +100,8 @@ class Tool(Protocol):
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        # Tool files that could not be loaded (see tools.loader); reported, not fatal.
+        self.load_errors: list[str] = []
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool

@@ -35,6 +35,31 @@ def builtin_skills_dir() -> Path:
     return (Path(__file__).resolve().parent / "builtin_skills").resolve()
 
 
+def builtin_tools_dir() -> Path:
+    """The function tools shipped inside the installed package."""
+
+    return (Path(__file__).resolve().parent / "builtin_tools").resolve()
+
+
+def resolve_tool_dirs(raw_extra: str | None, workspace: Path, include_builtin: bool = True) -> tuple[Path, ...]:
+    """Directories to load function tools from, in override order.
+
+    built-in -> ``~/.little_agent/tools`` -> ``<workspace>/tools`` ->
+    ``LITTLE_AGENT_TOOL_DIRS`` entries (relative ones from the workspace). A
+    later directory replaces an earlier tool of the same name. Missing
+    directories are simply skipped when loading.
+    """
+
+    dirs: list[Path] = [builtin_tools_dir()] if include_builtin else []
+    dirs.append((Path.home() / ".little_agent" / "tools").resolve())
+    dirs.append((workspace / "tools").resolve())
+    for item in (raw_extra or "").split(os.pathsep):
+        if item.strip():
+            path = Path(item.strip()).expanduser()
+            dirs.append((path if path.is_absolute() else workspace / path).resolve())
+    return tuple(dict.fromkeys(dirs))
+
+
 def resolve_skill_library(raw: str | None, workspace: Path) -> Path:
     """Where to load skills from, most specific source first.
 
@@ -106,6 +131,10 @@ class AgentConfig:
     # mcp.json files defining MCP servers, merged in order (later names win).
     # Empty means no MCP servers at all.
     mcp_config_paths: tuple[Path, ...] = ()
+    # Directories of @tool Python files, in override order (see tools.loader).
+    tool_dirs: tuple[Path, ...] = field(default_factory=lambda: (builtin_tools_dir(),))
+    # Tool names never registered, whichever directory defines them.
+    disabled_tools: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -174,4 +203,14 @@ class AgentConfig:
                 1, int(os.getenv("LITTLE_AGENT_MAX_PARALLEL_DELEGATIONS", "4"))
             ),
             mcp_config_paths=tuple(dict.fromkeys((global_mcp, project_mcp))),
+            tool_dirs=resolve_tool_dirs(
+                os.getenv("LITTLE_AGENT_TOOL_DIRS"),
+                workspace,
+                include_builtin=_as_bool(os.getenv("LITTLE_AGENT_BUILTIN_TOOLS"), True),
+            ),
+            disabled_tools=frozenset(
+                item.strip()
+                for item in (os.getenv("LITTLE_AGENT_DISABLED_TOOLS") or "").split(",")
+                if item.strip()
+            ),
         )
