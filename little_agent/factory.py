@@ -8,6 +8,7 @@ chat supplies a memory store and a session, a served task supplies neither.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from little_agent.agent import Agent
 from little_agent.agents import AgentProfile
@@ -15,6 +16,9 @@ from little_agent.config import AgentConfig
 from little_agent.control import StopController
 from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.skills.loader import SkillLoader
+
+if TYPE_CHECKING:
+    from little_agent.mcp.manager import McpView
 
 
 def build_agent(
@@ -24,6 +28,7 @@ def build_agent(
     stop: StopController,
     depth: int = 0,
     memory: MemoryStore | None = None,
+    mcp: "McpView | None" = None,
 ) -> Agent:
     """Construct an Agent for a profile (use agents.default_profile for the library).
 
@@ -58,6 +63,10 @@ def build_agent(
     skills = SkillLoader(
         [root.resolve() for root in profile.skill_roots()], names=profile.skill_names()
     )
+    if mcp is None and config.mcp_config_paths:
+        from little_agent.mcp.manager import shared_manager
+
+        mcp = shared_manager(config).view(profile.mcp_selection())
     agent = Agent(
         config=effective,
         skills=skills,
@@ -65,6 +74,7 @@ def build_agent(
         stop=stop,
         core_tools=profile.core_tools_set(),
         memory=memory or NullMemoryStore(),
+        mcp=mcp,
     )
 
     if depth < config.max_delegation_depth:

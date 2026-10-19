@@ -3,6 +3,7 @@
     little-agent chat                       interactive chat, persistent memory on
     little-agent chat --no-memory           interactive chat, nothing persisted
     little-agent serve-a2a --agent x --port 8801    serve the agent over A2A
+    little-agent serve-mcp --agent x                 serve the agent over MCP (stdio)
 
 Both modes build the same :class:`~little_agent.agent.Agent` through
 :func:`~little_agent.factory.build_agent`. They differ in two deliberate ways:
@@ -26,6 +27,7 @@ from little_agent.commands import CommandContext, CommandRegistry
 from little_agent.config import AgentConfig, describe_skill_library
 from little_agent.control import StopController
 from little_agent.factory import build_agent
+from little_agent.mcp import server as mcp_server
 from little_agent.memory.store import FileMemoryStore, MemoryStore, NullMemoryStore
 from little_agent.session import ChatSession
 
@@ -125,10 +127,14 @@ def chat(args: argparse.Namespace) -> None:
     print(f"Skills: {describe_skill_library(config)}")
     print(f"Active agent: {ctx.active_agent}")
     print(f"Memory: {memory.describe()}")
+    if agent.mcp is not None:
+        print(f"MCP: {agent.mcp.describe()}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
     warning = agent.skills.warning()
     if warning:
         print(warning)
+    for line in agent.mcp.warnings() if agent.mcp is not None else ():
+        print(line)
     print("Type /help for commands, /exit to quit.\n")
 
     _repl(ctx)
@@ -196,7 +202,7 @@ def _add_chat_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="little-agent",
-        description="Little Agent: chat with the agent, or serve it over A2A.",
+        description="Little Agent: chat with the agent, or serve it over A2A or MCP.",
     )
     subcommands = parser.add_subparsers(dest="command")
     _add_chat_arguments(
@@ -204,6 +210,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a2a_serve.add_arguments(
         subcommands.add_parser("serve-a2a", help="Serve this agent over the A2A protocol.")
+    )
+    mcp_server.add_arguments(
+        subcommands.add_parser("serve-mcp", help="Serve this agent as an MCP server over stdio.")
     )
     # The bare command is chat, so its options must parse without the subcommand.
     _add_chat_arguments(parser)
@@ -215,6 +224,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "serve-a2a":
         a2a_serve.run(args)
         return
+    if args.command == "serve-mcp":
+        mcp_server.run(args)
+        return
     chat(args)
 
 
@@ -225,6 +237,12 @@ def _shutdown() -> None:
         shutdown_shared()  # stop any local A2A servers started for delegation
     except Exception as exc:  # noqa: BLE001 - never let cleanup break exit.
         print(f"[a2a] peer shutdown skipped: {exc}")
+    try:
+        from little_agent.mcp.manager import shutdown_shared as shutdown_mcp
+
+        shutdown_mcp()  # close MCP server connections (stops stdio servers)
+    except Exception as exc:  # noqa: BLE001 - never let cleanup break exit.
+        print(f"[mcp] shutdown skipped: {exc}")
 
 
 if __name__ == "__main__":

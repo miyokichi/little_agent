@@ -103,6 +103,9 @@ class AgentConfig:
     max_delegation_depth: int = 2
     # How many subtasks delegate_tasks runs concurrently.
     max_parallel_delegations: int = 4
+    # mcp.json files defining MCP servers, merged in order (later names win).
+    # Empty means no MCP servers at all.
+    mcp_config_paths: tuple[Path, ...] = ()
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -135,6 +138,16 @@ class AgentConfig:
             if raw_global_profile
             else Path.home() / ".little_agent" / "profile.md"
         )
+        raw_global_mcp = os.getenv("LITTLE_AGENT_GLOBAL_MCP_CONFIG")
+        global_mcp = (
+            Path(raw_global_mcp).expanduser().resolve()
+            if raw_global_mcp
+            else Path.home() / ".little_agent" / "mcp.json"
+        )
+        configured_mcp = Path(os.getenv("LITTLE_AGENT_MCP_CONFIG", "mcp.json")).expanduser()
+        project_mcp = (
+            configured_mcp if configured_mcp.is_absolute() else workspace / configured_mcp
+        ).resolve()
         return cls(
             model=os.getenv("LITTLE_AGENT_MODEL", "gpt-4.1-mini"),
             workspace=workspace,
@@ -160,4 +173,5 @@ class AgentConfig:
             max_parallel_delegations=max(
                 1, int(os.getenv("LITTLE_AGENT_MAX_PARALLEL_DELEGATIONS", "4"))
             ),
+            mcp_config_paths=tuple(dict.fromkeys((global_mcp, project_mcp))),
         )

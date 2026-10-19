@@ -72,6 +72,10 @@ class AgentProfile:
     core_tools: list[str] | None = None
     max_tool_steps: int | None = None
     require_confirmation: bool | None = None
+    # MCP server names (from mcp.json) this agent may use. None on a real
+    # profile means none: MCP servers reach outside the workspace, so a profile
+    # opts in to each one. The built-in default agent gets all of them.
+    mcp_servers: list[str] | None = None
     # ``builtin`` marks the virtual "default" agent (the whole library); it has
     # no agent.json on disk and loads every skill in the library.
     builtin: bool = False
@@ -111,6 +115,13 @@ class AgentProfile:
     def core_tools_set(self) -> set[str] | None:
         return set(self.core_tools) if self.core_tools is not None else None
 
+    def mcp_selection(self) -> list[str] | None:
+        """MCP servers to give the agent; ``None`` means every configured one."""
+
+        if self.builtin:
+            return None
+        return list(self.mcp_servers or [])
+
     def tool_allowed(self, name: str) -> bool:
         """Whether a core tool (including the delegation tools) is available."""
 
@@ -144,6 +155,7 @@ def load_profile(agents_dir: Path, name: str, library_dir: Path | None = None) -
     core_tools = data.get("core_tools")
     max_steps = data.get("max_tool_steps")
     confirm = data.get("require_confirmation")
+    mcp_servers = data.get("mcp_servers")
     return AgentProfile(
         name=str(data.get("name") or directory.name),
         dir=directory,
@@ -154,6 +166,9 @@ def load_profile(agents_dir: Path, name: str, library_dir: Path | None = None) -
         core_tools=[str(item) for item in core_tools] if isinstance(core_tools, list) else None,
         max_tool_steps=int(max_steps) if max_steps is not None else None,
         require_confirmation=bool(confirm) if confirm is not None else None,
+        mcp_servers=(
+            [str(item) for item in mcp_servers] if isinstance(mcp_servers, list) else None
+        ),
     )
 
 

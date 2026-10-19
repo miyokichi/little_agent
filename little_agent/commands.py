@@ -418,6 +418,118 @@ def _cmd_agent(ctx: CommandContext, args: str) -> DispatchResult:
         return DispatchResult(output=f"Could not switch agent: {exc}")
 
 
+_MCP_USAGE = (
+    "Usage: /mcp                         servers and their status\n"
+    "       /mcp tools [server]          tools offered by MCP servers\n"
+    "       /mcp resources [server]      resources offered by MCP servers\n"
+    "       /mcp prompts [server]        prompts offered by MCP servers\n"
+    "       /mcp prompt <server> <name> [key=value ...]   run an MCP prompt\n"
+    "       /mcp reconnect <server>      restart a server connection"
+)
+
+
+def _cmd_mcp(ctx: CommandContext, args: str) -> DispatchResult:
+    view = getattr(ctx.agent, "mcp", None)
+    if view is None or (not view.states and not view.missing and not view.manager.config_error):
+        return DispatchResult(
+            output="No MCP servers for this agent. Define them in mcp.json "
+            "(and list them in the profile's \"mcp_servers\")."
+        )
+    words = args.split()
+    action = words[0].lower() if words else ""
+    states = {state.config.name: state for state in view.states}
+
+    def pick(name: str | None) -> list:
+        if name and name not in states:
+            raise KeyError(name)
+        return [states[name]] if name else list(states.values())
+
+    try:
+        if not action:
+            lines = ["MCP servers:"]
+            for state in view.states:
+                detail = f"{len(state.tool_specs)} tool(s)" if state.status == "connected" else ""
+                lines.append(
+                    f"  {state.config.name:<16} {state.status:<13} {state.config.transport:<5} "
+                    f"{detail}  {state.config.describe()}"
+                )
+                if state.error:
+                    lines.append(f"    error: {_first_line(state.error, 200)}")
+            lines.extend("  " + warning for warning in view.warnings() if "failed to start" not in warning)
+            return DispatchResult(output="\n".join(lines))
+        if action == "tools":
+            lines = []
+            for state in pick(words[1] if len(words) > 1 else None):
+                lines.append(f"{state.config.name} ({state.status}):")
+                for spec in state.tool_specs:
+                    lines.append(f"  {spec['name']:<24} {_first_line(str(spec.get('description', '')))}")
+            return DispatchResult(output="\n".join(lines) or "No MCP tools.")
+        if action in {"resources", "prompts"}:
+            lines = []
+            for state in pick(words[1] if len(words) > 1 else None):
+                client = state.client
+                if client is None or not client.connected:
+                    lines.append(f"{state.config.name}: not connected")
+                    continue
+                lines.append(f"{state.config.name}:")
+                if action == "resources":
+                    for item in client.list_resources():
+                        lines.append(f"  {item.get('uri')}  {item.get('title') or item.get('name', '')}")
+                    for item in client.list_resource_templates():
+                        lines.append(f"  {item.get('uriTemplate')}  (template) {item.get('name', '')}")
+                else:
+                    for item in client.list_prompts():
+                        arguments = " ".join(
+                            f"{arg.get('name')}{'' if arg.get('required') else '?'}=..."
+                            for arg in item.get("arguments") or []
+                        )
+                        lines.append(
+                            f"  {item.get('name'):<20} {arguments}  "
+                            f"{_first_line(str(item.get('description', '')))}"
+                        )
+            return DispatchResult(output="\n".join(lines) or f"No MCP {action}.")
+        if action == "prompt":
+            if len(words) < 3:
+                return DispatchResult(output=_MCP_USAGE)
+            state = pick(words[1])[0]
+            if state.client is None or not state.client.connected:
+                return DispatchResult(output=f"MCP server '{state.config.name}' is not connected.")
+            arguments = {}
+            for word in words[3:]:
+                key, sep, value = word.partition("=")
+                if not sep:
+                    return DispatchResult(output=f"Prompt arguments are key=value, got: {word}")
+                arguments[key] = value
+            result = state.client.get_prompt(words[2], arguments)
+            from little_agent.mcp.tools import render_content
+
+            parts = []
+            for message in result.get("messages") or []:
+                text, _images = render_content([message.get("content")])
+                if message.get("role") == "assistant":
+                    text = f"(assistant) {text}"
+                parts.append(text)
+            prompt = "\n\n".join(part for part in parts if part.strip())
+            if not prompt:
+                return DispatchResult(output="The MCP prompt returned no text.")
+            return DispatchResult(agent_prompt=prompt)
+        if action == "reconnect":
+            if len(words) < 2:
+                return DispatchResult(output=_MCP_USAGE)
+            state = view.manager.reconnect(pick(words[1])[0].config.name)
+            ctx.agent._register_mcp_tools()
+            if state.error:
+                return DispatchResult(output=f"Reconnect failed: {state.error}")
+            return DispatchResult(
+                output=f"Reconnected '{state.config.name}' ({len(state.tool_specs)} tool(s))."
+            )
+    except KeyError as exc:
+        return DispatchResult(output=f"Unknown MCP server: {exc.args[0]}. Known: {', '.join(states)}")
+    except Exception as exc:  # noqa: BLE001 - McpError and friends: report, keep the REPL alive.
+        return DispatchResult(output=f"MCP request failed: {exc}")
+    return DispatchResult(output=_MCP_USAGE)
+
+
 def _builtin_commands() -> list[BuiltinCommand]:
     return [
         BuiltinCommand("help", "List available commands.", _cmd_help, aliases=("?",)),
@@ -434,4 +546,5 @@ def _builtin_commands() -> list[BuiltinCommand]:
         ),
         BuiltinCommand("agents", "List agent profiles.", _cmd_agents),
         BuiltinCommand("agent", "Show or switch the active agent (/agent <name>).", _cmd_agent),
+        BuiltinCommand("mcp", "Show MCP servers, tools, resources, prompts (/mcp help).", _cmd_mcp),
     ]
