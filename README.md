@@ -60,6 +60,20 @@ LITTLE_AGENT_MODEL=local-model-name
 
 注意: このAgentはTool実行のために `tools` / `tool_calls` を使います。互換API側がtool callingに対応していない場合、通常の返答はできてもTool実行は動かない可能性があります。
 
+終了判定は Chat Completions の `choices[0].finish_reason` に従います。
+
+- `stop`: 正常終了。
+- `tool_calls`（旧 `function_call` も変換して対応）: ツール実行後に再問い合わせ。
+- `length`: トークン上限による未完了としてエラーを表示。
+- `content_filter`: フィルタによる停止としてエラーを表示。
+- 終了理由の欠落・未知の値・ツール呼び出しとの矛盾: 不正な応答としてエラーを表示。
+
+未完了・不正な応答に含まれるツールは実行しません。`LITTLE_AGENT_MAX_TOOL_STEPS` は引き続きループ上限です。独自の `LLMClient` も `finish_reason` を返す必要があります。
+
+ツール未登録時は `tools` / `tool_choice` を送信しません。拒否応答の `refusal` は表示します。ツール引数は元の JSON 文字列を会話に保持し、実行前に JSON オブジェクトであることと対応するスキーマ項目を検証します。不正な引数は補修や `{}` への置換をせず、ツールエラーとしてモデルに返します。
+
+仕様: [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+
 ## 起動モード
 
 ```powershell
@@ -216,6 +230,10 @@ MCPサーバが設定されていれば、そのToolが `mcp__<server>__<tool>` 
 ### PowerShell実行の安全仕様
 
 `run_powershell` はワークスペースをカレントディレクトリとして実行し、`Remove-Item` / `rm` / `rmdir` / `del` / `Format-Volume` / `Stop-Computer` / `Restart-Computer` / `Set-ExecutionPolicy` などの破壊的トークンを簡易ガードでブロックします。完全なサンドボックスではありません。
+
+標準入出力は UTF-8 に統一します。PowerShell のコンソールとパイプの文字コードを設定し、子プロセスには `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1` を渡すため、Python の日本語・絵文字出力も扱えます。不正な出力バイトは置換文字として取り込みます。CP932 固定の外部プログラムや、スクリプト内で明示した別の文字コードは個別の調整が必要です。ファイル読み書きの PowerShell コマンドレットの既定エンコーディングは変更しません。
+
+参考: [PowerShell の `$OutputEncoding`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables#outputencoding)、[Python の入出力エンコーディング設定](https://docs.python.org/3.11/using/cmdline.html#envvar-PYTHONIOENCODING)。
 
 ## Skills
 

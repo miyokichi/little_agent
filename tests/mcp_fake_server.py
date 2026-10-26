@@ -146,6 +146,9 @@ class FakeMcp:
 
 
 def serve_stdio() -> None:
+    # MCP stdio uses UTF-8 regardless of the host locale or Python defaults.
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     out = sys.stdout
     pending: list[dict] = []
     counter = iter(range(1, 1_000_000))

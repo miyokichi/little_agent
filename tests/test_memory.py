@@ -34,7 +34,7 @@ class RecordingClient:
         # Copy: the agent keeps appending to the same list during a run.
         self.calls.append(list(messages))
         reply = self.replies.pop(0) if self.replies else "ok"
-        return {"content": reply, "tool_calls": []}
+        return {"content": reply, "tool_calls": [], "finish_reason": "stop"}
 
     @property
     def last_system(self) -> str:

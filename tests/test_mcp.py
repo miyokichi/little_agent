@@ -258,8 +258,8 @@ class ScriptedLLM:
         self.calls.append([*messages])
         tool_messages = [message for message in messages if message.role == "tool"]
         if tool_messages:
-            return {"content": f"final: {tool_messages[-1].content}", "tool_calls": []}
-        return {"content": "", "tool_calls": [{"id": "c1", "name": self.tool, "arguments": self.arguments}]}
+            return {"content": f"final: {tool_messages[-1].content}", "tool_calls": [], "finish_reason": "stop"}
+        return {"content": "", "tool_calls": [{"id": "c1", "name": self.tool, "arguments": self.arguments}], "finish_reason": "tool_calls"}
 
 
 class AgentIntegrationTests(unittest.TestCase):

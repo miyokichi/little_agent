@@ -4,20 +4,24 @@ import json
 import socket
 import urllib.error
 import urllib.request
-from uuid import uuid4
 from typing import Any
-
-try:
-    from json_repair import repair_json as _repair_json
-    _HAS_JSON_REPAIR = True
-except ImportError:
-    _HAS_JSON_REPAIR = False
+from uuid import uuid4
 
 from little_agent.messages import Message, text_content
 from little_agent.tools.base import ToolRegistry
 
 
+class LLMResponseError(RuntimeError):
+    """An incomplete or invalid completion must not become a successful task."""
+
+
 class LLMClient:
+    """Return content, tool_calls, finish_reason, and optional usage/refusal.
+
+    ``finish_reason`` is required, including for local or custom clients.
+    Tool arguments may be dictionaries or raw JSON strings.
+    """
+
     def complete(
         self,
         model: str,
@@ -44,16 +48,34 @@ class OpenAICompatibleChatClient(LLMClient):
         body: dict[str, Any] = {
             "model": model,
             "messages": [self._message_payload(message) for message in messages],
-            "tools": tools.openai_schemas(),
-            "tool_choice": "auto",
         }
+        schemas = tools.openai_schemas()
+        if schemas:
+            body.update(tools=schemas, tool_choice="auto")
         response = self._post_json("/chat/completions", body)
-        choice = response["choices"][0]["message"]
-        return {
-            "content": choice.get("content") or "",
-            "tool_calls": self._tool_calls(choice),
+        choices = response.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise LLMResponseError("Chat completion API returned no valid choices.")
+        choice = choices[0]
+        message = choice.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            raise LLMResponseError("Chat completion API returned no valid assistant message.")
+        content = message.get("content")
+        refusal = message.get("refusal")
+        if content is not None and not isinstance(content, str):
+            raise LLMResponseError("Chat completion API returned non-text assistant content.")
+        if refusal is not None and not isinstance(refusal, str):
+            raise LLMResponseError("Chat completion API returned an invalid refusal.")
+        result = {
+            "content": content or "",
+            "refusal": refusal,
+            "finish_reason": choice.get("finish_reason"),
+            "tool_calls": self._tool_calls(message)
+            if choice.get("finish_reason") in ("stop", "tool_calls", "function_call") else [],
             "usage": response.get("usage") or {},
         }
+        validate_completion(result)
+        return result
 
     def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(body).encode("utf-8")
@@ -81,9 +103,9 @@ class OpenAICompatibleChatClient(LLMClient):
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Chat completion API returned invalid JSON: {raw[:500]}") from exc
+            raise LLMResponseError(f"Chat completion API returned invalid JSON: {raw[:500]}") from exc
         if not isinstance(parsed, dict):
-            raise RuntimeError("Chat completion API returned a non-object JSON response.")
+            raise LLMResponseError("Chat completion API returned a non-object JSON response.")
         return parsed
 
     @staticmethod
@@ -99,27 +121,42 @@ class OpenAICompatibleChatClient(LLMClient):
 
     @staticmethod
     def _tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_calls = message.get("tool_calls")
+        if raw_calls is None:
+            raw_calls = []
+        if not isinstance(raw_calls, list):
+            raise LLMResponseError("Chat completion API returned invalid tool_calls.")
         calls = []
-        for call in message.get("tool_calls") or []:
-            function = call.get("function") or {}
-            calls.append(
-                {
-                    "id": call.get("id") or f"call_{uuid4().hex[:12]}",
-                    "name": function.get("name", ""),
-                    "arguments": _json_object(function.get("arguments") or "{}"),
-                }
-            )
+        for call in raw_calls:
+            if not isinstance(call, dict) or call.get("type") != "function":
+                raise LLMResponseError("Chat completion API returned an unsupported tool call type.")
+            function = call.get("function")
+            if (
+                not isinstance(call.get("id"), str) or not call["id"]
+                or not isinstance(function, dict)
+                or not isinstance(function.get("name"), str) or not function["name"]
+                or not isinstance(function.get("arguments"), str)
+            ):
+                raise LLMResponseError("Chat completion API returned a malformed function tool call.")
+            calls.append({"id": call["id"], "name": function["name"], "arguments": function["arguments"]})
+        if len({call["id"] for call in calls}) != len(calls):
+            raise LLMResponseError("Chat completion API returned duplicate tool call IDs.")
 
+        # Deprecated function_call responses are adapted to the modern tool loop.
         legacy_call = message.get("function_call")
-        if legacy_call:
-            calls.append(
-                {
-                    "id": f"call_{uuid4().hex[:12]}",
-                    "name": legacy_call.get("name", ""),
-                    "arguments": _json_object(legacy_call.get("arguments") or "{}"),
-                }
-            )
-        return [call for call in calls if call["name"]]
+        if legacy_call is not None:
+            if (
+                calls or not isinstance(legacy_call, dict)
+                or not isinstance(legacy_call.get("name"), str) or not legacy_call["name"]
+                or not isinstance(legacy_call.get("arguments"), str)
+            ):
+                raise LLMResponseError("Chat completion API returned a malformed legacy function_call.")
+            calls.append({
+                "id": f"call_{uuid4().hex[:12]}",
+                "name": legacy_call["name"],
+                "arguments": legacy_call["arguments"],
+            })
+        return calls
 
 
 class LocalRuleClient(LLMClient):
@@ -133,7 +170,10 @@ class LocalRuleClient(LLMClient):
     ) -> dict[str, Any]:
         tool_messages = [message for message in messages if message.role == "tool"]
         if tool_messages:
-            return {"content": text_content(tool_messages[-1].content), "tool_calls": [], "usage": {}}
+            return {
+                "content": text_content(tool_messages[-1].content), "tool_calls": [],
+                "finish_reason": "stop", "usage": {},
+            }
 
         text = next(
             (text_content(message.content) for message in reversed(messages) if message.role == "user"),
@@ -141,32 +181,54 @@ class LocalRuleClient(LLMClient):
         )
         lowered = text.lower()
         if "time" in lowered or "date" in lowered:
-            return {"content": "", "tool_calls": [{"name": "get_datetime", "arguments": {}}], "usage": {}}
+            return {
+                "content": "", "finish_reason": "tool_calls", "usage": {},
+                "tool_calls": [{"name": "get_datetime", "arguments": {}}],
+            }
         if "list" in lowered or "ls" in lowered:
-            return {"content": "", "tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}], "usage": {}}
+            return {
+                "content": "", "finish_reason": "tool_calls", "usage": {},
+                "tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}],
+            }
         return {
             "content": (
                 "OPENAI_API_KEY is not configured, so I am running in local fallback mode. "
                 "I can still handle simple requests like date/time or listing the workspace."
             ),
             "tool_calls": [],
+            "finish_reason": "stop",
             "usage": {},
         }
 
 
-def _json_object(raw: str) -> dict[str, Any]:
-    if _HAS_JSON_REPAIR:
-        parsed = _repair_json(raw, return_objects=True)
-        return parsed if isinstance(parsed, dict) else {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+def validate_completion(response: dict[str, Any]) -> None:
+    """Require an explicit, consistent terminal reason for a non-streamed turn."""
+    reason = response.get("finish_reason")
+    if reason == "length":
+        raise LLMResponseError(
+            "Chat completion stopped with finish_reason=length (token limit); the response is incomplete."
+        )
+    if reason == "content_filter":
+        raise LLMResponseError(
+            "Chat completion stopped with finish_reason=content_filter; content was filtered."
+        )
+    if reason not in ("stop", "tool_calls", "function_call"):
+        raise LLMResponseError(f"Chat completion returned missing or unsupported finish_reason: {reason!r}.")
+    calls = response.get("tool_calls")
+    if calls is None:
+        calls = []
+    if not isinstance(calls, list):
+        raise LLMResponseError("Chat completion returned invalid tool_calls.")
+    if reason == "stop" and calls:
+        raise LLMResponseError("Chat completion returned finish_reason=stop with tool calls.")
+    if reason in ("tool_calls", "function_call") and not calls:
+        raise LLMResponseError(f"Chat completion returned finish_reason={reason} without tool calls.")
+    if response.get("refusal") and calls:
+        raise LLMResponseError("Chat completion returned a refusal with tool calls.")
 
 
 def _openai_tool_call(call: dict[str, Any]) -> dict[str, Any]:
-    arguments = call.get("arguments") or {}
+    arguments = call.get("arguments", {})
     if not isinstance(arguments, str):
         arguments = json.dumps(arguments, ensure_ascii=False)
     return {

@@ -41,7 +41,8 @@ class RecordingLLM:
     def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
         self.calls.append([*messages])
         reply = self.replies[min(len(self.calls), len(self.replies)) - 1]
-        return {"content": "", "tool_calls": [], **reply}
+        return {"content": "", "tool_calls": [],
+                "finish_reason": "tool_calls" if reply.get("tool_calls") else "stop", **reply}
 
 
 class SkillAndToolTests(unittest.TestCase):
@@ -401,13 +402,14 @@ class LLMClientTests(unittest.TestCase):
                 "tool_calls": [
                     {
                         "id": "call_1",
+                        "type": "function",
                         "function": {"name": "get_datetime", "arguments": "{}"},
                     }
                 ]
             }
         )
 
-        self.assertEqual(calls, [{"id": "call_1", "name": "get_datetime", "arguments": {}}])
+        self.assertEqual(calls, [{"id": "call_1", "name": "get_datetime", "arguments": "{}"}])
 
     def test_openai_compatible_client_wraps_timeout(self) -> None:
         client = OpenAICompatibleChatClient("test-key", "http://localhost:1234/v1", timeout=1)
@@ -437,10 +439,11 @@ class AgentLoopTests(unittest.TestCase):
                 if len(self.calls) == 1:
                     return {
                         "content": "",
+                        "finish_reason": "tool_calls",
                         "tool_calls": [{"id": "call_1", "name": "get_datetime", "arguments": {}}],
                     }
                 tool_messages = [message for message in messages if message.role == "tool"]
-                return {"content": f"Final answer based on {tool_messages[-1].content}", "tool_calls": []}
+                return {"content": f"Final answer based on {tool_messages[-1].content}", "tool_calls": [], "finish_reason": "stop"}
 
         llm = TwoStepLLM()
         agent = Agent(_config(), SkillLoader(LIBRARY), llm=llm)  # type: ignore[arg-type]
@@ -460,6 +463,7 @@ class AgentLoopTests(unittest.TestCase):
                 self.steps += 1
                 return {
                     "content": "",
+                    "finish_reason": "tool_calls",
                     "tool_calls": [{"id": f"c{self.steps}", "name": "get_datetime", "arguments": {}}],
                 }
 
@@ -642,8 +646,8 @@ class StatelessnessTests(unittest.TestCase):
         class AlwaysCalls:
             def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, object]:
                 if any(message.role == "tool" for message in messages):
-                    return {"content": "done", "tool_calls": []}
-                return {"content": "", "tool_calls": [{"id": "c1", "name": "needs_ok", "arguments": {}}]}
+                    return {"content": "done", "tool_calls": [], "finish_reason": "stop"}
+                return {"content": "", "tool_calls": [{"id": "c1", "name": "needs_ok", "arguments": {}}], "finish_reason": "tool_calls"}
 
         agent = Agent(
             _config(require_confirmation=True),

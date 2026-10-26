@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from little_agent.agent import Agent, StructuredOutputError
+from little_agent.llm import LLMResponseError
 from little_agent.messages import Message
 
 if TYPE_CHECKING:
@@ -62,6 +63,8 @@ class ChatSession:
             result = self.agent.run(text, history=self.history)
         except StructuredOutputError as exc:
             return f"Structured output error: {exc}"
+        except LLMResponseError as exc:
+            return f"LLM response error: {exc}"
         answer = result.text
         self.history.append(Message(role="user", content=text))
         self.history.append(Message(role="assistant", content=answer))

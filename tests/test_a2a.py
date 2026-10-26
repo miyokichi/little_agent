@@ -7,6 +7,7 @@ Card, JSON-RPC envelope, and task lifecycle are all exercised for real.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import unittest
@@ -16,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from little_agent import agents
 from little_agent.config import builtin_skills_dir
@@ -682,7 +684,7 @@ class TaskIsolationTests(unittest.TestCase):
         class Recorder:
             def complete(self, model, messages, tools):
                 seen.append([message.role for message in messages])
-                return {"content": "done", "tool_calls": []}
+                return {"content": "done", "tool_calls": [], "finish_reason": "stop"}
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -860,6 +862,7 @@ class WorkGrantOverA2ATests(unittest.TestCase):
                     if self.step == 1:
                         return {
                             "content": "",
+                            "finish_reason": "tool_calls",
                             "tool_calls": [
                                 {
                                     "id": "c1",
@@ -871,6 +874,7 @@ class WorkGrantOverA2ATests(unittest.TestCase):
                     if self.step == 2:
                         return {
                             "content": "",
+                            "finish_reason": "tool_calls",
                             "tool_calls": [
                                 {
                                     "id": "c2",
@@ -882,7 +886,7 @@ class WorkGrantOverA2ATests(unittest.TestCase):
                                 }
                             ],
                         }
-                    return {"content": "done", "tool_calls": []}
+                    return {"content": "done", "tool_calls": [], "finish_reason": "stop"}
 
             def factory(depth, stop, grant):
                 agent = build_agent(
@@ -946,10 +950,11 @@ class WorkGrantOverA2ATests(unittest.TestCase):
 
                 def complete(self, model, messages, tools):
                     if self.done:
-                        return {"content": "written", "tool_calls": []}
+                        return {"content": "written", "tool_calls": [], "finish_reason": "stop"}
                     self.done = True
                     return {
                         "content": "",
+                        "finish_reason": "tool_calls",
                         "tool_calls": [
                             {
                                 "id": "c1",
@@ -1210,12 +1215,13 @@ class LocalSpawnTests(unittest.TestCase):
                 pool.shutdown()
 
 
+    @patch.dict(os.environ, {"LITTLE_AGENT_A2A_ALLOW_ANY_PATH": "false", "OPENAI_API_KEY": ""})
     def test_a_spawned_child_accepts_a_grant_inside_the_parents_reach(self) -> None:
         """A locally spawned peer inherits the parent's reach, so a grant lands.
 
-        No LLM is involved: the grant is authorized (or refused) before the
-        child builds an agent, so an unauthorized path fails and an authorized
-        one gets past the gate.
+        Fix the grant policy independently of the developer's .env and use the
+        local fallback for accepted tasks. The grant is authorized (or refused)
+        before the child builds an agent.
         """
 
         with TemporaryDirectory() as tmp, TemporaryDirectory() as outside:
@@ -1228,7 +1234,7 @@ class LocalSpawnTests(unittest.TestCase):
                 client = pool.connect(name="helper")
 
                 # Inside the parent's workspace: the child authorizes it and
-                # starts working (the LLM call then fails harmlessly).
+                # starts working with the local fallback.
                 inside = client.send_message(
                     "noop", grant=WorkGrant(workspace=root / "case-7")
                 )

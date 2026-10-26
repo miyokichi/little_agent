@@ -30,7 +30,13 @@ from typing import TYPE_CHECKING, Any
 from little_agent import schema as json_schema
 from little_agent.config import AgentConfig
 from little_agent.control import StopController
-from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
+from little_agent.llm import (
+    LLMClient,
+    LLMResponseError,
+    LocalRuleClient,
+    OpenAICompatibleChatClient,
+    validate_completion,
+)
 from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.messages import Message, text_content
@@ -167,18 +173,24 @@ class Agent:
                     return self._stop_message()
                 try:
                     response = self.llm.complete(self.config.model, messages, self.tools)
+                    validate_completion(response)
+                    tool_calls = self._normalize_tool_calls(response.get("tool_calls") or [])
                 except RuntimeError as exc:
                     if self.logger:
                         self.logger.log_conversation("llm_error", error=str(exc))
+                    if isinstance(exc, LLMResponseError):
+                        raise
                     return f"LLM request failed: {exc}"
 
-                tool_calls = self._normalize_tool_calls(response.get("tool_calls", []))
-                content = response.get("content", "").strip()
+                content = (response.get("content") or response.get("refusal") or "").strip()
+                finish_reason = response["finish_reason"]
                 if self.logger:
                     self.logger.log_conversation(
                         "assistant_message",
                         content=content,
                         tool_calls=tool_calls,
+                        finish_reason=finish_reason,
+                        refusal=response.get("refusal"),
                         step=step + 1,
                     )
                     self.logger.log_usage(
@@ -187,7 +199,7 @@ class Agent:
                         model=self.config.model,
                         step=step + 1,
                     )
-                if not tool_calls:
+                if finish_reason == "stop":
                     final = content
                     break
 
@@ -314,13 +326,25 @@ class Agent:
                 self._mcp_tool_names.append(tool.name)
 
     def _run_tool(
-        self, execution: _Execution, name: str, arguments: dict[str, Any]
+        self, execution: _Execution, name: str, arguments: dict[str, Any] | str
     ) -> tuple[str, tuple[str, ...]]:
         if name not in self.tools.names():
             if self.logger:
                 self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
             return f"Unknown tool: {name}", ()
         tool = self.tools.get(name)
+        # Preserve raw JSON in the transcript; report invalid arguments so the
+        # model can correct them instead of executing a repaired/default call.
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments, parse_constant=_reject_json_constant)
+            except ValueError:
+                return "ERROR: Tool arguments must be valid JSON.", ()
+        if not isinstance(arguments, dict):
+            return "ERROR: Tool arguments must be a JSON object.", ()
+        errors = json_schema.validate(arguments, tool.parameters)
+        if errors:
+            return "ERROR: Invalid tool arguments: " + "; ".join(errors[:10]), ()
         if self.config.require_confirmation and tool.requires_confirmation and not execution.approved:
             if not self.confirm(name, arguments):
                 if self.logger:
@@ -355,17 +379,23 @@ class Agent:
 
     @staticmethod
     def _normalize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not isinstance(tool_calls, list):
+            raise LLMResponseError("LLM returned invalid tool_calls.")
         normalized = []
         for index, call in enumerate(tool_calls, start=1):
-            arguments = call.get("arguments") or {}
+            if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not call["name"]:
+                raise LLMResponseError("LLM returned a tool call without a valid name.")
+            arguments = call.get("arguments", {})
             normalized.append(
                 {
                     "id": str(call.get("id") or f"call_{index}"),
                     "name": str(call.get("name") or ""),
-                    "arguments": arguments if isinstance(arguments, dict) else {},
+                    "arguments": arguments,
                 }
             )
-        return [call for call in normalized if call["name"]]
+        if len({call["id"] for call in normalized}) != len(normalized):
+            raise LLMResponseError("LLM returned duplicate tool call IDs.")
+        return normalized
 
     def _stop_message(self) -> str:
         return f"Stopped by user (hotkey {self.stop.hotkey})."
@@ -413,6 +443,10 @@ class Agent:
 
 # Sentinel distinguishing "parsed to JSON null" from "did not parse".
 _INVALID = object()
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"Invalid JSON constant: {value}")
 
 
 def _paths_text(paths: tuple[Any, ...]) -> str:

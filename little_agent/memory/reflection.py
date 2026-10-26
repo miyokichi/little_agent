@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from little_agent.llm import LLMClient
+from little_agent.llm import LLMClient, validate_completion
 from little_agent.messages import Message, text_content
 from little_agent.tools.base import ToolRegistry
 
@@ -79,6 +79,9 @@ class Reflector:
         ]
         try:
             response = self.llm.complete(self.model, prompt, ToolRegistry())
+            validate_completion(response)
+            if response.get("refusal") or response["finish_reason"] != "stop":
+                return None
         except Exception:  # noqa: BLE001 - reflection must never break the session.
             return None
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-Role = Literal["system", "user", "assistant", "tool"]
+Role = Literal["developer", "system", "user", "assistant", "tool"]
 
 # Content is either plain text, or a list of OpenAI-style content blocks
 # (e.g. {"type": "text", ...} and {"type": "image_url", ...}) for multimodal input.
