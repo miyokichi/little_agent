@@ -253,7 +253,7 @@ class Agent:
                         )
                     )
                     pending_images.extend((call["name"], uri) for uri in images)
-                if stopped:
+                if stopped or self.stop.triggered:
                     return self._stop_message()
                 # Tool messages cannot carry images in the OpenAI chat format, so image
                 # outputs are forwarded in a follow-up user message after all tool replies.
@@ -451,6 +451,7 @@ class Agent:
             readable_paths=(*self.config.readable_paths, *self._skill_dirs),
             writable_paths=self.config.writable_paths,
             require_confirmation=self.config.require_confirmation,
+            is_cancelled=lambda: self.stop.triggered,
         )
         try:
             result = tool.run(context, **arguments)

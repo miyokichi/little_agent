@@ -9,7 +9,8 @@ class StopController:
     The listener is only active while ``arm()`` is in effect (i.e. while the
     agent is executing a turn), so it never intercepts keys while the user is
     typing at the prompt. When the hotkey fires, ``triggered`` becomes True and
-    the agent loop aborts between tool calls.
+    the agent loop aborts between tool calls. Cooperative tools such as
+    ``run_powershell`` also poll it during a long-running call.
 
     If ``pynput`` is not installed the controller degrades gracefully: no hotkey
     is registered and ``triggered`` stays False. The user can still abort with

@@ -235,6 +235,27 @@ MCPサーバが設定されていれば、そのToolが `mcp__<server>__<tool>` 
 
 参考: [PowerShell の `$OutputEncoding`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables#outputencoding)、[Python の入出力エンコーディング設定](https://docs.python.org/3.11/using/cmdline.html#envvar-PYTHONIOENCODING)。
 
+### GUI入力が終わるまで待つ
+
+`run_powershell` はコマンドの終了まで結果を返しません。`timeout_seconds` は省略時30秒、正の整数で秒数指定、**`0` で時間制限なし**です。GUI入力待ちには `0` を指定してください。待機中は次のLLM呼び出しに進みません。
+
+たとえば、workspaceがこのリポジトリで、その中に `.venv` がある場合は次のTool引数で付属のTkinter入力画面を起動できます。
+
+```json
+{
+  "command": "& '.\\.venv\\Scripts\\python.exe' '.\\examples\\gui_input.py'",
+  "timeout_seconds": 0
+}
+```
+
+Pythonとスクリプトのパスは自分の環境に合わせて変更してください。別の仮想環境のPythonでも、実行ファイルを直接指定すれば利用できます。Windowsにログインしているデスクトップ上からagentを起動してください。サービスなど画面を持たないセッションでの起動では、この変更だけでGUIを表示できるようにはなりません。
+
+`examples/gui_input.py` は「確定」後に `{"status": "ok", "value": "入力内容"}` をstdoutへ出力して終了します。「キャンセル」・Escape・ウィンドウを閉じる操作では `{"status": "cancelled"}` を返します。Toolはその結果をLLMへ返し、エージェントが続きを実行します。キャンセルもGUIの正常な終了なのでTool自体は成功です。後続処理はJSONの `status` を見て分岐してください。
+
+自作GUIも同じように、入力確定・キャンセル時に結果を出力して**プロセスを終了**させてください。診断ログはstderrへ出すと、stdoutをJSONとして扱えます。`Start-Process`（`-Wait`なし）などで切り離すと、GUI入力が完了する前にToolが戻ってしまいます。Pythonを上記のように `&` で直接実行する形を推奨します。
+
+停止ホットキーやA2Aの `tasks/cancel` は待機中も確認し、停止時・タイムアウト時にはPowerShellとその配下のプロセスの終了を試みます（Windowsは `taskkill /T /F`）。意図的に切り離したプロセスは管理対象にできません。PowerShell・Python子プロセス・出力の読み取りはUTF-8に揃えています。
+
 ## Skills
 
 Skillは公開仕様 **[Agent Skills](https://agentskills.io/specification)** の形式（YAMLフロントマター付きの `SKILL.md` を持つフォルダ）です。Claude Code や Codex など、ほかの対応クライアント向けに書かれたSkillをそのまま使え、こちらで作ったSkillもほかのクライアントで使えます。

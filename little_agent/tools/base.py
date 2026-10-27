@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -68,6 +69,8 @@ class ToolContext:
     readable_paths: tuple[Path, ...] = field(default_factory=tuple)
     writable_paths: tuple[Path, ...] = field(default_factory=tuple)
     require_confirmation: bool = True
+    # Long-running tools may poll this without coupling to a particular UI.
+    is_cancelled: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
     @property
     def path_policy(self) -> PathAccessPolicy:

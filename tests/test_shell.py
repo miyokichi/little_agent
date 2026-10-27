@@ -19,9 +19,9 @@ def context(tmp_path):
 
 def test_shell_preserves_parent_environment_and_cwd(context):
     with patch.dict(os.environ, {"PYTHONIOENCODING": "cp932", "PYTHONUTF8": "0"}):
-        with patch("little_agent.tools.shell.subprocess.run", return_value=subprocess.CompletedProcess(
-            [], 0, "ok\n", "",
-        )) as execute:
+        with patch("little_agent.tools.shell.subprocess.Popen") as execute:
+            execute.return_value.communicate.return_value = ("ok\n", "")
+            execute.return_value.returncode = 0
             result = RunPowerShellTool().run(context, command="Write-Output ok", timeout_seconds=7)
         assert os.environ["PYTHONIOENCODING"] == "cp932"
         assert os.environ["PYTHONUTF8"] == "0"
@@ -29,13 +29,13 @@ def test_shell_preserves_parent_environment_and_cwd(context):
         assert options["env"]["PYTHONIOENCODING"] == "utf-8"
         assert options["env"]["PYTHONUTF8"] == "1"
         assert options["cwd"] == context.workspace
-        assert options["timeout"] == 7
+        execute.return_value.communicate.assert_called_once_with(timeout=0.2)
     assert result.ok
     assert result.content == "ok"
 
 
 def test_blocked_command_is_not_started(context):
-    with patch("little_agent.tools.shell.subprocess.run") as execute:
+    with patch("little_agent.tools.shell.subprocess.Popen") as execute:
         result = RunPowerShellTool().run(context, command="Remove-Item important.txt")
     assert not result.ok
     execute.assert_not_called()
