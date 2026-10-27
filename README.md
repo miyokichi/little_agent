@@ -312,9 +312,20 @@ pdf-processing/
 2. **本文** … モデルが「このSkillが合う」と判断したら `activate_skill` Toolを名前付きで呼び、`SKILL.md` の本文を `<skill_content>` で受け取ります。Skillのディレクトリと同梱ファイルの一覧（中身ではなく名前だけ）も付きます。`name` 引数は実在するSkill名の enum なので、存在しないSkillは呼べません。同じ実行で2回呼んでも本文は1回しか入りません。
 3. **リソース** … 本文が参照する `references/` などは、モデルが `read_file` で必要なときに読みます。**Skillディレクトリは読み取り専用で許可**されるので、ワークスペース外の同梱Skillでも読めますが、書き換えはできません。
 
-chat では `/<skill-name> 依頼` で、モデルの判断を待たずにそのSkillを有効にして依頼できます（例: `/excel-file 売上.xlsx を集計して`）。
+### どのSkillを使うかはLLMが決める
 
-以前のキーワードスコアリングによる自動選択（全文をpromptへ注入）はやめ、選ぶのはモデルです。
+Runtime 側ではSkillを選びません（キーワード一致による事前選択や、本文の自動注入はしません）。全Skillのカタログを見たモデルが、タスクに合うものを自分で選んで `activate_skill` を呼びます。不要なSkillは有効にしません。
+
+**Skillが持つTool（`tools.json`）も、そのSkillが有効になって初めて読み込まれます。** 実行の開始時点でモデルに見えるのは Core Tool と `activate_skill` などだけで、たとえば `read_excel` は `excel-file` を有効にした後にしか現れません。
+
+1. 実行開始 … カタログだけを提示。Skill Tool はどれも未登録
+2. モデルが `activate_skill(name="excel-file")` … 本文を受け取り、同時に `read_excel` / `write_excel` が登録される（結果に `Tools now available from this skill: ...` と出る）
+3. 以降のステップでそのToolを使える
+4. 実行が終わるとSkill Toolは外れ、次の実行（chat の次のターン、次のA2Aタスク）はまた何も選ばれていない状態から始まる
+
+有効にしていないSkillのToolをモデルが呼ぼうとした場合は、実行せずに「そのToolは `excel-file` Skill のものなので、合うなら先に `activate_skill` を」と返します。Agent Profile の `"skills"` で許可されていないSkillのToolは、有効化の候補にもなりません。
+
+chat では `/<skill-name> 依頼` で、**ユーザーが**Skillを選べます（例: `/excel-file 売上.xlsx を集計して`）。そのターンの開始前にSkillが有効になり、本文が依頼の前に置かれ、Toolも読み込まれます。会話履歴には依頼の文だけが残ります。`/tools` は、登録済みToolに加えて「Skillを有効にすると読み込まれるTool」も一覧します。
 
 ### 検証（寛容モード）
 
@@ -371,7 +382,7 @@ Skills: D:\shared\skill-library (configured)
 
 ### Skill Script Tool仕様
 
-Agent Skills 仕様の外にある **Little Agent 独自の拡張**です。Skillは `tools.json` と `scripts/` を持つことで、coreに実装を追加せずにToolを提供できます（仕様は任意のファイルを置くことを認めているので、`tools.json` があってもほかのクライアントではそのまま読めます）。
+Agent Skills 仕様の外にある **Little Agent 独自の拡張**です。Skillは `tools.json` と `scripts/` を持つことで、coreに実装を追加せずにToolを提供できます（仕様は任意のファイルを置くことを認めているので、`tools.json` があってもほかのクライアントではそのまま読めます）。これらのToolは、そのSkillをモデル（または `/<skill-name>` でユーザー）が有効にしたときにだけ登録されます。
 
 ```text
 skills/<skill-name>/
@@ -770,8 +781,8 @@ little-agent chat --no-memory
 | `/help` | `/?` | 全コマンドを説明付きで一覧 |
 | `/exit` | `/quit` | セッション終了（memory ONならここで auto-learning が走る） |
 | `/skills` | | 読み込み済みSkillを一覧（`/skills <name>` で詳細と本文、`/skills check` で読み込みの問題） |
-| `/<skill-name>` | | そのSkillを有効にして依頼を送る（例: `/excel-file 売上.xlsx を集計して`） |
-| `/tools` | | 登録済みToolを一覧 |
+| `/<skill-name>` | | ユーザーがSkillを選んで依頼を送る。本文とそのSkillのToolが最初から有効になる（例: `/excel-file 売上.xlsx を集計して`） |
+| `/tools` | | 登録済みToolと、Skillを有効にすると読み込まれるToolを一覧 |
 | `/usage` | | 当セッションのtoken累計を表示 |
 | `/config` | | model・workspace・memory状態などの設定を表示 |
 | `/reload` | | `commands/*.md` を再読込 |

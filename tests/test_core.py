@@ -94,12 +94,19 @@ class SkillAndToolTests(unittest.TestCase):
         ):
             self.assertIn(expected, names)
 
-    def test_agent_registers_skill_script_tools(self) -> None:
+    def test_skill_script_tools_load_only_when_the_skill_is_activated(self) -> None:
         agent = Agent(_config(), SkillLoader(LIBRARY))
 
-        self.assertIn("get_datetime", agent.tools.names())
-        self.assertIn("create_skill", agent.tools.names())
+        # Not offered up front: the model has to choose the skill first.
+        self.assertNotIn("get_datetime", agent.tools.names())
+        self.assertNotIn("read_excel", agent.tools.names())
+        self.assertEqual(agent.skill_tool_index["read_excel"], "excel-file")
+        self.assertEqual(agent.skill_tool_index["create_skill"], "skill-creator")
+
+        result = agent.tools.get("activate_skill").run(ToolContext(Path.cwd()), name="excel-file")
+        self.assertIn("Tools now available from this skill: read_excel, write_excel", result.content)
         self.assertIn("read_excel", agent.tools.names())
+        self.assertNotIn("get_datetime", agent.tools.names())  # other skills stay unloaded
 
     def test_workspace_path_rejects_parent_escape(self) -> None:
         workspace = (Path.cwd() / ".test-workspace").resolve()

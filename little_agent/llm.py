@@ -169,21 +169,35 @@ class LocalRuleClient(LLMClient):
         tools: ToolRegistry,
     ) -> dict[str, Any]:
         tool_messages = [message for message in messages if message.role == "tool"]
-        if tool_messages:
-            return {
-                "content": text_content(tool_messages[-1].content), "tool_calls": [],
-                "finish_reason": "stop", "usage": {},
-            }
-
         text = next(
             (text_content(message.content) for message in reversed(messages) if message.role == "user"),
             "",
         )
         lowered = text.lower()
-        if "time" in lowered or "date" in lowered:
+        wants_time = "time" in lowered or "date" in lowered
+        last = text_content(tool_messages[-1].content) if tool_messages else ""
+        # Like a real model: a skill's tools appear only after activating it.
+        if wants_time and last.startswith("[activate_skill]") and "get_datetime" in tools.names():
             return {
                 "content": "", "finish_reason": "tool_calls", "usage": {},
                 "tool_calls": [{"name": "get_datetime", "arguments": {}}],
+            }
+        if tool_messages:
+            return {
+                "content": last, "tool_calls": [],
+                "finish_reason": "stop", "usage": {},
+            }
+
+        if wants_time:
+            if "get_datetime" in tools.names():
+                call = {"name": "get_datetime", "arguments": {}}
+            elif "activate_skill" in tools.names():
+                call = {"name": "activate_skill", "arguments": {"name": "datetime"}}
+            else:
+                call = {"name": "get_datetime", "arguments": {}}
+            return {
+                "content": "", "finish_reason": "tool_calls", "usage": {},
+                "tool_calls": [call],
             }
         if "list" in lowered or "ls" in lowered:
             return {

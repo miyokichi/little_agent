@@ -155,7 +155,9 @@ class SkillLoader:
         return (
             "The following skills provide specialized instructions for specific tasks. "
             "When a task matches a skill's description, call the activate_skill tool with "
-            "the skill's name to load its full instructions before proceeding. When a skill "
+            "the skill's name to load its full instructions before proceeding. Choose the "
+            "skill yourself from the descriptions; activate only the skills the task needs. "
+            "A skill's own tools become available only after it is activated. When a skill "
             "references relative paths, resolve them against the skill's directory and use "
             "absolute paths in tool calls.\n\n"
             f"<available_skills>\n{entries}\n</available_skills>"
@@ -164,16 +166,24 @@ class SkillLoader:
     # --- Little Agent extension: script tools --------------------------------
 
     def load_tools(self) -> list[ScriptSkillTool]:
+        """Every skill's script tools (the agent loads them per skill on activation)."""
+
         tools: list[ScriptSkillTool] = []
         for skill in self.load_all():
-            manifest_path = skill.directory / "tools.json" if skill.directory else None
-            if manifest_path is None or not manifest_path.is_file():
-                continue
-            try:
-                tools.extend(_load_tools_manifest(manifest_path))
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                print(f"Warning: skipped invalid skill tool manifest {manifest_path}: {exc}")
+            tools.extend(self.tools_for(skill))
         return tools
+
+    def tools_for(self, skill: Skill) -> list[ScriptSkillTool]:
+        """The script tools one skill declares in its ``tools.json`` (if any)."""
+
+        manifest_path = skill.directory / "tools.json" if skill.directory else None
+        if manifest_path is None or not manifest_path.is_file():
+            return []
+        try:
+            return _load_tools_manifest(manifest_path)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Warning: skipped invalid skill tool manifest {manifest_path}: {exc}")
+            return []
 
 
 def parse_skill_file(path: Path, diagnostics: list[SkillDiagnostic] | None = None) -> Skill | None:

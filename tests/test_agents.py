@@ -165,8 +165,10 @@ class ProfileCapabilityTests(unittest.TestCase):
             agent = self._build(Path(tmp), "narrow", skills=["datetime"])
 
             self.assertEqual([skill.name for skill in agent.skills.load_all()], ["datetime"])
-            self.assertIn("get_datetime", agent.tools.names())
-            self.assertNotIn("read_excel", agent.tools.names())  # excel_file not granted
+            # Skill tools are loaded on activation, and only for granted skills.
+            self.assertEqual(agent.skill_tool_index.get("get_datetime"), "datetime")
+            self.assertNotIn("read_excel", agent.skill_tool_index)  # excel_file not granted
+            self.assertNotIn("read_excel", agent.tools.names())
 
     def test_core_tool_allowlist_is_applied(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -175,7 +177,8 @@ class ProfileCapabilityTests(unittest.TestCase):
 
             self.assertIn("read_file", names)  # allowed core tool
             self.assertNotIn("run_powershell", names)  # filtered-out core tool
-            self.assertIn("get_datetime", names)  # skill script tools are unaffected
+            self.assertIn("activate_skill", names)  # skills are still reachable
+            self.assertIn("get_datetime", agent.skill_tool_index)  # skill tools are unaffected
 
     def test_delegation_is_granted_by_default_and_deniable_by_profile(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -209,7 +212,8 @@ class ProfileCapabilityTests(unittest.TestCase):
             names = set(agent.tools.names())
 
             self.assertIn("run_powershell", names)
-            self.assertIn("get_datetime", names)
+            self.assertIn("activate_skill", names)
+            self.assertIn("get_datetime", agent.skill_tool_index)
             self.assertIn("delegate_task", names)
 
 

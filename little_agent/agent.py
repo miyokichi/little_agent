@@ -99,15 +99,16 @@ class Agent:
         # No store means "remember nothing" — never a silent fallback to disk.
         self.memory: MemoryStore = memory or NullMemoryStore()
         # ``core_tools`` is a per-agent allowlist for the built-in core tools.
-        # Skill script tools are always registered.
         self.tools = tools or default_tools(core_tools)
-        for tool in self.skills.load_tools():
-            if tool.name not in self.tools.names():
-                self.tools.register(tool)
-        # Skills are disclosed progressively: a catalog in the system prompt and
-        # activate_skill to load one. The tool exists only while skills do.
-        self._activation = ActivateSkillTool(self.skills)
+        # Skills are disclosed progressively and chosen by the model: a catalog
+        # in the system prompt, activate_skill to load one. A skill's own script
+        # tools (tools.json) are registered only once the model has activated
+        # that skill, and dropped again when the next run starts.
+        self._activation = ActivateSkillTool(self.skills, on_activate=self._load_skill_tools)
         self._skill_dirs: tuple[Path, ...] = ()
+        self._skill_tool_names: list[str] = []
+        # tool name -> skill name, for every skill tool that *could* be loaded.
+        self.skill_tool_index: dict[str, str] = {}
         self._sync_skills()
         # Memory tools exist only when the store persists something.
         for tool in self.memory.tools():
@@ -128,8 +129,14 @@ class Agent:
         context: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         history: Sequence[Message] | None = None,
+        activate_skills: Sequence[str] = (),
     ) -> RunResult:
         """Execute one task and return its result.
+
+        Which skills to use is normally the model's choice (``activate_skill``).
+        ``activate_skills`` names skills the *user* chose explicitly (chat's
+        ``/<skill-name>``): they are activated before the model starts — their
+        instructions go in front of the instruction and their tools are loaded.
 
         ``context`` is situational data supplied by the caller for this execution
         only; it is rendered into the prompt and never persisted. When
@@ -151,6 +158,9 @@ class Agent:
 
         execution = _Execution()
         skills = self._sync_skills()
+        preactivated = self._preactivate(activate_skills)
+        if preactivated:
+            prompt = "\n\n".join([*preactivated, prompt])
         execution.messages.append(
             self._system_prompt(skills, output_schema, conversational=bool(history))
         )
@@ -160,7 +170,11 @@ class Agent:
         )
         execution.messages.append(Message(role="user", content=prompt))
 
-        final = self._loop(execution)
+        try:
+            final = self._loop(execution)
+        finally:
+            # The choice of skills belongs to this run only.
+            self._unload_skill_tools()
         if self.logger:
             self.logger.log_conversation("final_answer", content=final)
         if output_schema is None:
@@ -333,12 +347,56 @@ class Agent:
         skills = self.skills.load_all()
         self._skill_dirs = tuple(skill.directory for skill in skills if skill.directory is not None)
         self._activation.begin_run()
+        # Each run starts with no skill chosen, so no skill tools loaded.
+        self._unload_skill_tools()
+        self.skill_tool_index = {
+            tool.name: skill.name for skill in skills for tool in self.skills.tools_for(skill)
+        }
         if skills:
             self._activation.refresh([skill.name for skill in skills])
             self.tools.register(self._activation)
         else:
             self.tools.unregister(self._activation.name)
         return skills
+
+    def _unload_skill_tools(self) -> None:
+        for name in self._skill_tool_names:
+            self.tools.unregister(name)
+        self._skill_tool_names = []
+
+    def _load_skill_tools(self, skill: Any) -> list[str]:
+        """Register an activated skill's script tools; returns the names added.
+
+        A tool whose name is already taken (a core tool, another skill's) is
+        left as it is rather than replaced.
+        """
+
+        added: list[str] = []
+        for tool in self.skills.tools_for(skill):
+            if tool.name in self.tools.names():
+                continue
+            self.tools.register(tool)
+            self._skill_tool_names.append(tool.name)
+            added.append(tool.name)
+        if added and self.logger:
+            self.logger.log_tool("skill_tools_loaded", skill=skill.name, tools=added)
+        return added
+
+    def _preactivate(self, names: Sequence[str]) -> list[str]:
+        """Activate user-chosen skills up front; returns their instruction blocks."""
+
+        blocks: list[str] = []
+        for name in names:
+            skill = self.skills.get(name)
+            if skill is None or skill.name in self._activation.activated:
+                continue
+            self._activation.activated.add(skill.name)
+            added = self._load_skill_tools(skill)
+            block = skill.activation_content()
+            if added:
+                block += f"\n\nTools now available from this skill: {', '.join(added)}"
+            blocks.append(block)
+        return blocks
 
     # --- tools ---------------------------------------------------------------
 
@@ -359,6 +417,12 @@ class Agent:
         if name not in self.tools.names():
             if self.logger:
                 self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
+            owner = self.skill_tool_index.get(name)
+            if owner is not None:
+                return (
+                    f"ERROR: Tool '{name}' belongs to the skill '{owner}', which is not active. "
+                    f"Call activate_skill with name '{owner}' first if that skill fits the task."
+                ), ()
             return f"Unknown tool: {name}", ()
         tool = self.tools.get(name)
         # Preserve raw JSON in the transcript; report invalid arguments so the

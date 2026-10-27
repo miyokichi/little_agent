@@ -341,9 +341,9 @@ class AgentTests(unittest.TestCase):
             registry = CommandRegistry(workspace / "commands", workspace / "global")
             ctx = CommandContext(session=ChatSession(agent), registry=registry)
 
-            prompt = registry.dispatch(ctx, "/pdf-processing merge a.pdf and b.pdf").agent_prompt
-            self.assertTrue(prompt.startswith('<skill_content name="pdf-processing">'))
-            self.assertTrue(prompt.endswith("merge a.pdf and b.pdf"))
+            chosen = registry.dispatch(ctx, "/pdf-processing merge a.pdf and b.pdf")
+            self.assertEqual(chosen.agent_prompt, "merge a.pdf and b.pdf")
+            self.assertEqual(chosen.activate_skills, ("pdf-processing",))
             self.assertIn("Apache-2.0", registry.dispatch(ctx, "/skills pdf-processing").output)
             listing = registry.dispatch(ctx, "/skills").output
             self.assertIn("pdf-processing", listing)
@@ -351,6 +351,124 @@ class AgentTests(unittest.TestCase):
             self.assertIn("lowercase", registry.dispatch(ctx, "/skills check").output)
             self.assertIn("/<skill-name>", registry.dispatch(ctx, "/help").output)
             self.assertIn("Unknown command", registry.dispatch(ctx, "/no-such-skill").output)
+
+
+DATE_SKILL = """
+    ---
+    name: clock
+    description: Tells the current time. Use when the user asks what time it is.
+    ---
+    Call now() and report it.
+"""
+
+NOW_TOOLS = json.dumps({"tools": [{
+    "name": "now", "description": "Current time.", "script": "scripts/now.py",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}]})
+NOW_SCRIPT = 'import json\nprint(json.dumps({"ok": True, "content": "12:00"}))\n'
+
+
+class Picker:
+    """A model that tries the skill tool first, then activates the skill, then uses it."""
+
+    def __init__(self) -> None:
+        self.offered: list[list[str]] = []
+
+    def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict:
+        self.offered.append(tools.names())
+        results = [m for m in messages if m.role == "tool"]
+        step = len(results)
+        calls = [
+            {"id": "1", "name": "now", "arguments": {}},
+            {"id": "2", "name": "activate_skill", "arguments": {"name": "clock"}},
+            {"id": "3", "name": "now", "arguments": {}},
+        ]
+        if step < len(calls):
+            return {"content": "", "finish_reason": "tool_calls", "tool_calls": [calls[step]]}
+        return {"content": " | ".join(str(m.content) for m in results), "tool_calls": [], "finish_reason": "stop"}
+
+
+class ModelChoosesSkillTests(unittest.TestCase):
+    def _agent(self, tmp: str, llm) -> Agent:
+        library = Path(tmp) / "library"
+        write_skill(library, "clock", DATE_SKILL, {"tools.json": NOW_TOOLS, "scripts/now.py": NOW_SCRIPT})
+        write_skill(library, "other", "---\nname: other\ndescription: Unrelated.\n---\n")
+        return Agent(_config(Path(tmp), skill_library_dir=library), SkillLoader(library), llm=llm)
+
+    def test_skill_tools_appear_only_after_the_model_activates_the_skill(self) -> None:
+        with TemporaryDirectory() as tmp:
+            llm = Picker()
+            agent = self._agent(tmp, llm)
+            text = agent.run("what time is it?").text
+
+            self.assertNotIn("now", llm.offered[0])  # not offered before the choice
+            self.assertIn("activate_skill", llm.offered[0])
+            self.assertIn("belongs to the skill 'clock'", text)  # helpful refusal
+            self.assertIn("Tools now available from this skill: now", text)
+            self.assertIn("now", llm.offered[2])  # offered once chosen
+            self.assertIn("OK: 12:00", text)
+
+            self.assertNotIn("now", agent.tools.names())  # unloaded when the run ends
+
+            # The next run starts with no skill chosen again.
+            llm2 = Picker()
+            agent.llm = llm2
+            agent.run("and now?")
+            self.assertNotIn("now", llm2.offered[0])
+
+    def test_system_prompt_leaves_the_choice_to_the_model(self) -> None:
+        with TemporaryDirectory() as tmp:
+            prompts: list[str] = []
+
+            class Capture:
+                def complete(self, model, messages, tools):
+                    prompts.append(messages[0].content)
+                    return {"content": "ok", "tool_calls": [], "finish_reason": "stop"}
+
+            self._agent(tmp, Capture()).run("what time is it?")
+        # Every skill is listed, the unrelated one too: nothing is pre-selected
+        # by the harness, and no skill body is injected before the model chooses.
+        self.assertIn("<name>clock</name>", prompts[0])
+        self.assertIn("<name>other</name>", prompts[0])
+        self.assertIn("Choose the skill yourself", prompts[0])
+        self.assertNotIn("Call now() and report it.", prompts[0])
+
+    def test_user_chosen_skill_is_activated_up_front(self) -> None:
+        with TemporaryDirectory() as tmp:
+            seen: list = []
+
+            class Once:
+                def complete(self, model, messages, tools):
+                    seen.append((tools.names(), messages[-1].content))
+                    return {"content": "done", "tool_calls": [], "finish_reason": "stop"}
+
+            agent = self._agent(tmp, Once())
+            session = ChatSession(agent)
+            session.send("tell me the time", activate_skills=("clock",))
+            names, user_message = seen[0]
+            self.assertIn("now", names)
+            self.assertTrue(user_message.startswith('<skill_content name="clock">'))
+            self.assertTrue(user_message.endswith("tell me the time"))
+            self.assertEqual(session.history[0].content, "tell me the time")  # transcript stays clean
+
+            session.send("again")
+            self.assertNotIn("now", seen[1][0])
+
+    def test_local_fallback_activates_before_using_a_skill_tool(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            agent = Agent(config, SkillLoader(LIBRARY))  # no API key: LocalRuleClient
+            text = agent.run("what time is it").text
+        self.assertIn("[get_datetime]", text)
+
+    def test_tools_command_shows_what_activation_would_load(self) -> None:
+        with TemporaryDirectory() as tmp:
+            agent = self._agent(tmp, Picker())
+            registry = CommandRegistry(Path(tmp) / "commands", Path(tmp) / "global")
+            ctx = CommandContext(session=ChatSession(agent), registry=registry)
+            output = registry.dispatch(ctx, "/tools").output
+        self.assertIn("Loaded when the skill is activated", output)
+        self.assertIn("clock", output)
 
 
 class DiscoveryTests(unittest.TestCase):

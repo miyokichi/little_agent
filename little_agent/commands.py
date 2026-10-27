@@ -44,6 +44,8 @@ class DispatchResult:
     output: str | None = None
     agent_prompt: str | None = None
     should_exit: bool = False
+    # Skills the user chose explicitly (``/<skill-name>``) for this prompt.
+    activate_skills: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -219,13 +221,13 @@ class CommandRegistry:
             return self.builtins[canonical].handler(ctx, args)
         if name in self.custom:
             return DispatchResult(agent_prompt=self.custom[name].render(args))
-        # /<skill-name> [request]: user-explicit activation. The skill's
-        # instructions are put in front of the request, so the model does not
-        # have to decide to activate it.
+        # /<skill-name> [request]: the user picks the skill instead of the
+        # model. The agent activates it before the run starts (instructions in
+        # front of the request, its tools loaded).
         skill = ctx.agent.skills.get(name)
         if skill is not None:
             request = args.strip() or f"Follow the '{skill.name}' skill."
-            return DispatchResult(agent_prompt=f"{skill.activation_content()}\n\n{request}")
+            return DispatchResult(agent_prompt=request, activate_skills=(skill.name,))
         return DispatchResult(
             output=f"Unknown command: /{name}\nType /help to see available commands."
         )
@@ -316,6 +318,15 @@ def _cmd_tools(ctx: CommandContext, args: str) -> DispatchResult:
         tool = ctx.agent.tools.get(name)
         flag = " (confirm)" if getattr(tool, "requires_confirmation", False) else ""
         lines.append(f"  {name:<22} {_first_line(tool.description)}{flag}")
+    pending: dict[str, list[str]] = {}
+    for tool_name, skill in getattr(ctx.agent, "skill_tool_index", {}).items():
+        if tool_name not in names:
+            pending.setdefault(skill, []).append(tool_name)
+    if pending:
+        lines.append("")
+        lines.append("Loaded when the skill is activated (by the model, or /<skill-name>):")
+        for skill in sorted(pending):
+            lines.append(f"  {skill:<22} {', '.join(sorted(pending[skill]))}")
     return DispatchResult(output="\n".join(lines))
 
 

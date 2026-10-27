@@ -5,6 +5,12 @@ fits the task it calls this tool with the name and receives the ``SKILL.md``
 body wrapped in ``<skill_content>``, with the skill directory and a listing of
 its bundled files (not their contents — those are read on demand).
 
+Which skill to use is the model's decision, not the harness's: nothing is
+pre-selected by keyword matching. Activation is also what *loads* a skill — the
+script tools a skill declares in ``tools.json`` are registered only when the
+model activates it (``on_activate``), so a skill's tools never reach the model
+until it has chosen that skill.
+
 The ``name`` parameter is an enum of the skills that exist, so the model cannot
 ask for one that does not. A skill already activated in this run is not
 injected a second time.
@@ -12,9 +18,11 @@ injected a second time.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from little_agent.skills.loader import SkillLoader
+from little_agent.skills.models import Skill
 from little_agent.tools.base import ToolContext, ToolResult
 
 TOOL_NAME = "activate_skill"
@@ -24,8 +32,14 @@ class ActivateSkillTool:
     name = TOOL_NAME
     requires_confirmation = False
 
-    def __init__(self, loader: SkillLoader) -> None:
+    def __init__(
+        self,
+        loader: SkillLoader,
+        on_activate: Callable[[Skill], list[str]] | None = None,
+    ) -> None:
         self.loader = loader
+        # Called with the activated skill; returns the tool names it made available.
+        self.on_activate = on_activate
         self._names: list[str] = []
         self.activated: set[str] = set()
         self.refresh()
@@ -69,4 +83,8 @@ class ActivateSkillTool:
         if skill.name in self.activated:
             return ToolResult(True, f"Skill '{skill.name}' is already active; its instructions are above.")
         self.activated.add(skill.name)
-        return ToolResult(True, skill.activation_content())
+        added = self.on_activate(skill) if self.on_activate is not None else []
+        content = skill.activation_content()
+        if added:
+            content += f"\n\nTools now available from this skill: {', '.join(added)}"
+        return ToolResult(True, content)

@@ -56,11 +56,15 @@ class ChatSession:
 
         self.agent = agent
 
-    def send(self, text: str) -> str:
-        """Run one turn and return the answer, recording both sides."""
+    def send(self, text: str, activate_skills: tuple[str, ...] | list[str] = ()) -> str:
+        """Run one turn and return the answer, recording both sides.
+
+        ``activate_skills`` are skills the user chose for this turn; otherwise
+        the model decides which skills to activate.
+        """
 
         try:
-            result = self.agent.run(text, history=self.history)
+            result = self.agent.run(text, history=self.history, activate_skills=activate_skills)
         except StructuredOutputError as exc:
             return f"Structured output error: {exc}"
         except LLMResponseError as exc:

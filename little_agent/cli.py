@@ -167,7 +167,7 @@ def _repl(ctx: CommandContext) -> None:
         if result.output is not None:
             print(result.output)
         if result.agent_prompt is not None:
-            print(ctx.session.send(result.agent_prompt))
+            print(ctx.session.send(result.agent_prompt, activate_skills=result.activate_skills))
         if result.should_exit:
             return
         print()
