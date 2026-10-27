@@ -26,7 +26,7 @@ Runtime は**1本**で、その上に **Chat**（人と対話する）、**A2A**
 | **A2A** | `little_agent/a2a/` | Agent Card・JSON-RPC・Task・workspace grant |
 | **Memory** | `little_agent/memory/` | 永続memoryの抽象。Runtimeとは疎結合 |
 | **Workspace** | `little_agent/tools/base.py`, `paths.py`, `a2a/grant.py` | 読み書きできる範囲の決定と検証 |
-| **Skills** | `little_agent/skills/`（loader）, `little_agent/builtin_skills/`（実装） | Skill定義とSkill Tool。coreから分離 |
+| **Skills** | `little_agent/skills/`（loader）, `little_agent/builtin_skills/`（実装） | [Agent Skills](https://agentskills.io/specification) 形式のSkillの探索・検証・段階的な読み込み。coreから分離 |
 | **MCP** | `little_agent/mcp/` | MCPクライアント（外部サーバのTool/Resource/Prompt）と `serve-mcp` |
 
 Runtime 自身は実行の間に何も持ち越しません。会話を続けたい側（Chat）が履歴を保持して渡し、独立させたい側（A2A）は何も渡しません。
@@ -237,7 +237,9 @@ MCPサーバが設定されていれば、そのToolが `mcp__<server>__<tool>` 
 
 ## Skills
 
-Skillは **`little_agent/builtin_skills/` に同梱**され、pipでコードと一緒にインストールされます。Skillは**workspaceのデータではなくRuntimeの資源**なので、作業ディレクトリをどこに向けてもSkillが消えることはありません。
+Skillは公開仕様 **[Agent Skills](https://agentskills.io/specification)** の形式（YAMLフロントマター付きの `SKILL.md` を持つフォルダ）です。Claude Code や Codex など、ほかの対応クライアント向けに書かれたSkillをそのまま使え、こちらで作ったSkillもほかのクライアントで使えます。
+
+同梱Skillは **`little_agent/builtin_skills/` に入っており**、pipでコードと一緒にインストールされます。Skillは**workspaceのデータではなくRuntimeの資源**なので、作業ディレクトリをどこに向けてもSkillが消えることはありません。
 
 Skill実装とCore Runtimeは分離されており、Skill Loader だけが両者をつなぎます。
 
@@ -246,16 +248,18 @@ little_agent/
 ├─ agent.py
 ├─ ...
 ├─ skills/               # Skillの読み込み機構（core側）
-│  ├─ loader.py
+│  ├─ loader.py        # 探索・パース・検証・カタログ
+│  ├─ frontmatter.py   # SKILL.md のYAMLフロントマター（標準ライブラリのみ）
+│  ├─ activation.py    # activate_skill Tool
 │  ├─ models.py
-│  └─ script_tool.py
+│  └─ script_tool.py   # tools.json（Little Agent 拡張）
 │
 └─ builtin_skills/       # 同梱Skillの実装（データ側／パッケージに同梱）
-   ├─ file_manager/
-   ├─ python_coder/
-   ├─ windows_operator/
-   ├─ excel_file/
-   ├─ ppt_file/
+   ├─ file-manager/
+   ├─ python-coder/
+   ├─ windows-operator/
+   ├─ excel-file/
+   ├─ ppt-file/
    └─ ...
 ```
 
@@ -263,7 +267,83 @@ little_agent/
 - 新しいSkillの追加はフォルダを足すだけで、coreの変更も登録作業も不要です。
 - 外部リポジトリ化やgit submodule化はしていません。
 
-### Skillライブラリの探索順序
+### SKILL.md（Agent Skills 形式）
+
+```markdown
+---
+name: pdf-processing
+description: PDFからテキストや表を抜き出し、フォームを埋め、結合する。PDFやフォームの話題が出たときに使う。
+license: Apache-2.0                      # 任意
+compatibility: Requires poppler          # 任意（500文字以内）
+metadata:                                # 任意（文字列→文字列）
+  author: example-org
+  version: "1.0"
+allowed-tools: read_file write_file      # 任意（スペース区切り。実験的）
+---
+# PDF Processing
+
+## Instructions
+1. まず [リファレンス](references/REFERENCE.md) を読む。
+2. 抽出は `scripts/extract.py` を使う。
+```
+
+```text
+pdf-processing/
+├─ SKILL.md        # 必須
+├─ scripts/        # 任意: 実行するコード
+├─ references/     # 任意: 必要なときに読む資料
+├─ assets/         # 任意: テンプレート・画像・データ
+└─ tools.json      # 任意: Little Agent 拡張（下の Skill Script Tool）
+```
+
+| 項目 | 必須 | 規則 |
+| --- | --- | --- |
+| `name` | ○ | 小文字英数字と単一のハイフン、64文字以内、先頭・末尾にハイフン不可。**フォルダ名と一致** |
+| `description` | ○ | 1024文字以内。「何をするか」と「いつ使うか」を両方書く（エージェントはこれだけを見て使うか決める） |
+| `license` / `compatibility` / `metadata` / `allowed-tools` | | 仕様どおり。独自の項目は `metadata` の下に置く |
+
+本文（フロントマターの後）はSkillが有効になったときに渡される手順です。500行以内を目安にし、詳しい資料は `references/` に分けて相対パスで参照します。
+
+### 段階的な読み込み（Progressive disclosure）
+
+仕様どおり、Skillは3段階で読み込まれます。
+
+1. **カタログ** … 毎回の実行で、全Skillの `name` / `description` / 場所だけを `<available_skills>` として system prompt に入れます（1件あたり数十〜百トークン）。Skillが無ければこの節も出しません。
+2. **本文** … モデルが「このSkillが合う」と判断したら `activate_skill` Toolを名前付きで呼び、`SKILL.md` の本文を `<skill_content>` で受け取ります。Skillのディレクトリと同梱ファイルの一覧（中身ではなく名前だけ）も付きます。`name` 引数は実在するSkill名の enum なので、存在しないSkillは呼べません。同じ実行で2回呼んでも本文は1回しか入りません。
+3. **リソース** … 本文が参照する `references/` などは、モデルが `read_file` で必要なときに読みます。**Skillディレクトリは読み取り専用で許可**されるので、ワークスペース外の同梱Skillでも読めますが、書き換えはできません。
+
+chat では `/<skill-name> 依頼` で、モデルの判断を待たずにそのSkillを有効にして依頼できます（例: `/excel-file 売上.xlsx を集計して`）。
+
+以前のキーワードスコアリングによる自動選択（全文をpromptへ注入）はやめ、選ぶのはモデルです。
+
+### 検証（寛容モード）
+
+仕様のクライアント向けガイドに従い、ほかのクライアント向けに書かれたSkillも読めるよう**寛容に**検証します。
+
+| 状況 | 扱い |
+| --- | --- |
+| `name` が命名規則に合わない／フォルダ名と違う／長すぎる | 警告して読み込む |
+| 仕様外のフロントマター項目 | 警告して読み込む |
+| `description` が無い・空 | **読み込まない**（カタログに出せないため） |
+| フロントマターが解釈できない（閉じていない等） | **読み込まない** |
+| `description: Use when: ...` のようにコロンを含む未クォート値 | 意図どおりの文字列として読む |
+| フロントマターの無い旧形式（`# name` / `## Description` / `## When to use` / `## Allowed tools` / `## Instructions`） | 旧形式として読み込み、移行を促す警告を出す |
+
+問題は起動時に件数を表示し、chat の `/skills check` で一覧できます。`skill-creator` の `validate_skill` は仕様どおり厳密に検査します。
+
+### Skillの探索順序
+
+```text
+1. agents/<name>/skills/           … そのエージェント専用（Agent Profile）
+2. <workspace>/.agents/skills/     … プロジェクト（クライアント共通の置き場所）
+3. Skillライブラリ                 … 下の1つ（ワークスペース側なら 4 より優先）
+4. ~/.agents/skills/               … ユーザー（クライアント共通の置き場所）
+5. （ライブラリが同梱の場合）little_agent/builtin_skills/
+```
+
+同じ名前のSkillは**先に見つかったものが勝ち**、隠れた側は警告に記録されます。つまりプロジェクト ＞ ユーザー ＞ 同梱 です。`.agents/skills/` はほかの対応クライアントと共有される置き場所で、`LITTLE_AGENT_SHARED_SKILLS=false` で探さないようにできます。
+
+Skillライブラリは次のうち1つです。
 
 ```text
 1. LITTLE_AGENT_SKILL_LIBRARY_DIR   … 明示指定。最優先
@@ -287,32 +367,14 @@ Skills: D:\shared\skill-library (configured)
 
 **Skillが0件のときは黙って起動しません。** 探した場所・存在しなかったディレクトリ・プロファイルが要求したSkill名を挙げて警告します（`"skills": []` と明示したプロファイルは意図的な選択なので警告しません）。
 
-### SKILL.md
-
-```markdown
-# skill_name
-
-## Description
-Skillの説明。
-
-## When to use
-- 発動条件
-
-## Allowed tools
-- 使用してよいTool名
-
-## Instructions
-Agentが従う手順や注意点。
-```
-
-Skill選択は軽量なキーワードスコアリングで、実行ごとに instruction + context に対して行われます。
+プロジェクトのSkill（`<workspace>/skills`、`<workspace>/.agents/skills`）はそのままエージェントへの指示になり、`tools.json` があればスクリプトも実行されます。信頼できないリポジトリをワークスペースにするときは注意してください。
 
 ### Skill Script Tool仕様
 
-Skillは `tools.json` と `scripts/` を持つことで、coreに実装を追加せずにToolを提供できます。
+Agent Skills 仕様の外にある **Little Agent 独自の拡張**です。Skillは `tools.json` と `scripts/` を持つことで、coreに実装を追加せずにToolを提供できます（仕様は任意のファイルを置くことを認めているので、`tools.json` があってもほかのクライアントではそのまま読めます）。
 
 ```text
-skills/<skill_name>/
+skills/<skill-name>/
   SKILL.md
   tools.json
   scripts/
@@ -343,30 +405,32 @@ skills/<skill_name>/
 
 標準入出力は**両側ともUTF-8に固定**されるので、日本語を返すSkillもコンソールのコードページに影響されません。`scripts/` の外を指すスクリプトを書いたmanifestは読み込み時に拒否されます。
 
-`skills/<skill_name>` フォルダをコピーするだけで、Skillの説明・Tool定義・実行ロジックをまとめて移動できます。
+`skills/<skill-name>` フォルダをコピーするだけで、Skillの説明・Tool定義・実行ロジックをまとめて移動できます。
 
 ### 同梱Skill
 
+フォルダ名は仕様の命名規則（ハイフン区切り）に合わせています。Agent Profile の `"skills"` に旧名（`excel_file` など、`_` 区切り）を書いていても同じSkillとして扱います。
+
 | Skill | 内容 |
 | --- | --- |
-| `file_manager` | ファイル探索・読み書き・検索 |
-| `python_coder` | Python実装・調査・実行確認 |
-| `windows_operator` | Windows/PowerShell操作 |
-| `excel_file` | `.xlsx` の読み取りと簡易作成（`read_excel` / `write_excel`） |
-| `ppt_file` | `.pptx` のテキスト読み取りと簡易作成（`read_ppt` / `write_ppt`） |
-| `workspace_harness` | 「1タスク=1フォルダ」のファイルシステム型タスクハーネス。人がエリアを統制し、AIはその中で作業する |
-| `project_manager` | `data/projects.json` による依存関係付きプロジェクト/タスク管理。ローカルWebビューアで人も編集できる |
-| `agent_manager` | Agent Profile（`agents/<name>/agent.json`）の作成・編集 |
-| `skill_creator` | ポータブルSkillの作成、雛形生成、簡易検証（`create_skill` / `validate_skill`） |
+| `file-manager` | ファイル探索・読み書き・検索 |
+| `python-coder` | Python実装・調査・実行確認 |
+| `windows-operator` | Windows/PowerShell操作 |
+| `excel-file` | `.xlsx` の読み取りと簡易作成（`read_excel` / `write_excel`） |
+| `ppt-file` | `.pptx` のテキスト読み取りと簡易作成（`read_ppt` / `write_ppt`） |
+| `workspace-harness` | 「1タスク=1フォルダ」のファイルシステム型タスクハーネス。人がエリアを統制し、AIはその中で作業する |
+| `project-manager` | `data/projects.json` による依存関係付きプロジェクト/タスク管理。ローカルWebビューアで人も編集できる |
+| `agent-manager` | Agent Profile（`agents/<name>/agent.json`）の作成・編集 |
+| `skill-creator` | Agent Skills 形式のSkillの作成と、仕様に沿った検証（`create_skill` / `validate_skill`） |
 | `datetime` | 現在日時・曜日・タイムゾーンの取得 |
 | `git` | gitリポジトリの状態確認・差分・コミット |
-| `screen_capture` | PC画面のスクリーンショット取得（Vision対応モデルへ画像を直接渡す） |
-| `computer_use` | マウス/キーボードによるPC操作 |
+| `screen-capture` | PC画面のスクリーンショット取得（Vision対応モデルへ画像を直接渡す） |
+| `computer-use` | マウス/キーボードによるPC操作 |
 | `outlook-email-extractor` | Outlookからのメール抽出 |
 
-Officeファイル系は外部ライブラリなしでOffice Open XMLを扱います（`.xls` / `.ppt` は非対応、読み取りと簡易新規作成が中心）。`screen_capture` は `mss` + `Pillow`、`computer_use` は `pyautogui` が必要です。`project_manager` のビューアは `skills/project_manager/scripts/viewer.py` としてSkillフォルダ内に同梱されています（coreには入っていません）。
+Officeファイル系は外部ライブラリなしでOffice Open XMLを扱います（`.xls` / `.ppt` は非対応、読み取りと簡易新規作成が中心）。`screen-capture` は `mss` + `Pillow`、`computer-use` は `pyautogui` が必要です。`project-manager` のビューアは `skills/project-manager/scripts/viewer.py` としてSkillフォルダ内に同梱されています（coreには入っていません）。
 
-`project_manager` のビューアのポートは `LITTLE_AGENT_VIEWER_PORT`（既定 `8765`）で変えられます。`workspace_harness` は `tasks/`（`LITTLE_AGENT_TASKS_DIR`）と `shared/`（`LITTLE_AGENT_SHARED_DIR`）を使います。リポジトリにサンプルが入っています。これらはworkspace側に作られ、無ければ自動生成されます。
+`project-manager` のビューアのポートは `LITTLE_AGENT_VIEWER_PORT`（既定 `8765`）で変えられます。`workspace-harness` は `tasks/`（`LITTLE_AGENT_TASKS_DIR`）と `shared/`（`LITTLE_AGENT_SHARED_DIR`）を使います。リポジトリにサンプルが入っています。これらはworkspace側に作られ、無ければ自動生成されます。
 
 ## Agent Profile
 
@@ -391,7 +455,7 @@ agents/                     # 各エージェント（.gitignore 対象。運用
   "name": "observer",
   "description": "観測結果の解釈だけを行うエージェント",
   "model": null,
-  "skills": ["datetime", "file_manager"],
+  "skills": ["datetime", "file-manager"],
   "core_tools": ["read_file", "list_dir"],
   "max_tool_steps": null,
   "require_confirmation": null,
@@ -705,7 +769,8 @@ little-agent chat --no-memory
 | --- | --- | --- |
 | `/help` | `/?` | 全コマンドを説明付きで一覧 |
 | `/exit` | `/quit` | セッション終了（memory ONならここで auto-learning が走る） |
-| `/skills` | | 読み込み済みSkillを一覧（`/skills <name>` で詳細） |
+| `/skills` | | 読み込み済みSkillを一覧（`/skills <name>` で詳細と本文、`/skills check` で読み込みの問題） |
+| `/<skill-name>` | | そのSkillを有効にして依頼を送る（例: `/excel-file 売上.xlsx を集計して`） |
 | `/tools` | | 登録済みToolを一覧 |
 | `/usage` | | 当セッションのtoken累計を表示 |
 | `/config` | | model・workspace・memory状態などの設定を表示 |
@@ -735,7 +800,7 @@ description: 指定ファイルをレビューして改善点を優先度付き�
 
 - **実行内の一括承認**: 確認が必要なToolを最初に実行するとき一度だけ確認し、承認するとその実行の残りは再確認しません（PC操作中にカーソルを奪い合わないため）。
 - **緊急停止ホットキー**: エージェントが動作している間だけ有効なグローバルホットキー（既定 `Ctrl+Alt+Q`、`LITTLE_AGENT_STOP_HOTKEY`）。Tool実行の合間で中断します。`pynput` を使うため標準の依存に含まれます。
-- `computer_use` 使用時は、マウスを画面の隅へ動かすと pyautogui の failsafe が即アボートします。
+- `computer-use` 使用時は、マウスを画面の隅へ動かすと pyautogui の failsafe が即アボートします。
 
 ## ログとToken集計
 
@@ -762,19 +827,20 @@ python -m pytest -q
 | `tests/test_memory.py` | MemoryStore（File/Null）、ChatSessionの会話継続、auto-learning |
 | `tests/test_launch.py` | 起動モードの引数解釈と、各モードが選ぶMemoryStore |
 | `tests/test_skills.py` | 同梱Skillの読み込み、Skill Tool実行、Skill追加、ライブラリ探索順序、0件時の警告、core非依存の検証 |
+| `tests/test_skill_format.py` | Agent Skills 形式: フロントマターの解釈、寛容な検証、旧形式の読み込み、カタログと `activate_skill`、Skillディレクトリの読み取り専用許可、`/<skill-name>`、`.agents/skills` の探索、`skill-creator` の出力 |
 | `tests/test_grant.py` | workspace / allowed_paths の表現と、読み書き権限ごとの2段階認可 |
 | `tests/test_a2a.py` | A2Aサーバ/クライアント実HTTP、TextPart/DataPart、cancel、Task非共有、workspace受け渡し、委譲・並列委譲 |
 | `tests/test_schema.py` | 内蔵JSON Schemaバリデータ |
 | `tests/test_agents.py` | Agent Profile（Skill/Tool/委譲の制限、profile解決） |
 | `tests/test_commands.py` | スラッシュコマンド |
-| `tests/test_workspace_harness.py` | `workspace_harness` Skillのタスクフォルダ操作 |
+| `tests/test_workspace_harness.py` | `workspace-harness` Skillのタスクフォルダ操作 |
 | `tests/test_mcp.py` | mcp.json、MCPクライアント（stdio実プロセス / Streamable HTTPのJSON・SSE）、Tool/Resource/Prompt、Profile選択、`/mcp`、`serve-mcp`（実プロセスでのクライアント↔サーバ往復を含む） |
 
 ## 拡張方法
 
 **Toolを追加する**: `little_agent/tools` にToolクラスを追加し、`name` / `description` / `parameters` / `requires_confirmation` / `run()` を実装して、`little_agent/tools/__init__.py` の `default_tools()` に登録します。
 
-**Skillを追加する**: Skillライブラリに `<new_skill>/SKILL.md` を作り、必要なら `tools.json` と `scripts/` を足します。coreの変更は不要です。自分のプロジェクトだけで使うなら `<workspace>/skills/` に、同梱として配りたいなら `little_agent/builtin_skills/` に置きます。
+**Skillを追加する**: Skillライブラリ（または `<workspace>/.agents/skills/`）に `<new-skill>/SKILL.md` を作り、フロントマターに `name`（フォルダ名と同じ）と `description` を書きます。必要なら `scripts/` / `references/` / `assets/` と `tools.json` を足します。coreの変更は不要です。ほかの Agent Skills 対応クライアント向けのSkillもそのままコピーして使えます。
 
 **外部のToolをつなぐ**: MCPサーバなら `mcp.json` に書くだけです。coreもSkillも変更不要です。
 
@@ -785,6 +851,6 @@ python -m pytest -q
 - A2Aはブロッキング＋ポーリングのみ（`message/stream` のSSEとpush通知は意図的に未対応）
 - タスクストアはインメモリ（プロセス再起動で消えます）
 - PowerShell安全ガードは簡易的です
-- Skill選択はキーワードスコアリング（embedding検索やLLM routingは未実装）
+- Skillのフロントマターは仕様で使う範囲のYAMLだけを解釈します（アンカーや複雑なネストは非対応）
 - Web検索Toolはありません（`fetch_url` によるURL取得のみ）
 - Structured Output に失敗したときの自動リトライは行いません（そのまま失敗として返します）

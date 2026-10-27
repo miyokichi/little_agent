@@ -1,20 +1,18 @@
-# git
-
-## Description
-Gitリポジトリの状態確認、変更のステージング、コミットを支援する。
+---
+name: git
+description: "Gitリポジトリの状態確認、変更のステージング、コミットを支援する。 Use when: ワークスペースのgit状態（変更ファイル一覧）を確認したいとき; 変更差分（diff）を確認したいとき; コミット履歴を確認したいとき; ファイルをステージングしてコミットしたいとき."
+allowed-tools: git_status git_diff git_log git_add git_commit
+metadata:
+  author: little-agent
+  version: "1.0"
+---
+# Git
 
 ## When to use
 - ワークスペースのgit状態（変更ファイル一覧）を確認したいとき
 - 変更差分（diff）を確認したいとき
 - コミット履歴を確認したいとき
 - ファイルをステージングしてコミットしたいとき
-
-## Allowed tools
-- git_status
-- git_diff
-- git_log
-- git_add
-- git_commit
 
 ## Instructions
 - コミット前は必ず `git_status` で状態を確認する。

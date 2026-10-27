@@ -1,7 +1,12 @@
-# agent_manager
-
-## Description
-エージェントのプロファイル（使うスキルとツールの構成）を作成・管理する。全スキルを保管するライブラリ（skills/）から、選んだスキルフォルダを各エージェント（agents/<name>/）にコピーして構成する。エージェントの一覧、詳細表示、スキルの追加・削除、コアツールの許可リスト設定、削除に対応する。
+---
+name: agent-manager
+description: "エージェントのプロファイル（使うスキルとツールの構成）を作成・管理する。全スキルを保管するライブラリ（skills/）から、選んだスキルフォルダを各エージェント（agents/<name>/）にコピーして構成する。エージェントの一覧、詳細表示、スキルの追加・削除、コアツールの許可リスト設定、削除に対応する。 Use when: 用途特化のエージェントを作りたいとき（例: Office作業用、PC操作用、調査用）; 「エージェントを作って」「このエージェントにスキルを追加して」「エージェント一覧を見せて」などの依頼; 各エージェントが使えるスキルやツールを設定・変更したいとき; 実行するエージェントの選択・切替そのものは、CLIの `/agents` `/agent <name>` コマンドや起動時の `--agent` で行う（このスキルは構成の管理担当）; サブタスクを別のエージェントに **委譲** したいとき（「〜を別のエージェントに任せて」「この作業は office エージェントに委譲して」）は、コアToolの `delegate_task`（A2Aプロトコル経由）を使う（このスキルのツールではなく常時利用可能）."
+allowed-tools: create_agent list_agents show_agent add_agent_skill remove_agent_skill set_agent_core_tools delete_agent
+metadata:
+  author: little-agent
+  version: "1.0"
+---
+# Agent Manager
 
 ## When to use
 - 用途特化のエージェントを作りたいとき（例: Office作業用、PC操作用、調査用）
@@ -9,15 +14,6 @@
 - 各エージェントが使えるスキルやツールを設定・変更したいとき
 - 実行するエージェントの選択・切替そのものは、CLIの `/agents` `/agent <name>` コマンドや起動時の `--agent` で行う（このスキルは構成の管理担当）
 - サブタスクを別のエージェントに **委譲** したいとき（「〜を別のエージェントに任せて」「この作業は office エージェントに委譲して」）は、コアToolの `delegate_task`（A2Aプロトコル経由）を使う（このスキルのツールではなく常時利用可能）
-
-## Allowed tools
-- create_agent
-- list_agents
-- show_agent
-- add_agent_skill
-- remove_agent_skill
-- set_agent_core_tools
-- delete_agent
 
 ## Instructions
 - エージェントは agents/<name>/ に作られる。skills/ 配下のライブラリからスキルフォルダを **コピー** して構成する（スナップショット。ライブラリを後で編集してもコピー済みには反映されない）。

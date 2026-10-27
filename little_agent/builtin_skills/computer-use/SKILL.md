@@ -1,19 +1,17 @@
-# computer_use
-
-## Description
-マウスとキーボードでPCを操作する。画面を見て決めた操作（クリック、文字入力、キー操作）を実機に反映する。`screen_capture` で画面を「見て」、このスキルで「操作」する。
+---
+name: computer-use
+description: "マウスとキーボードでPCを操作する。画面を見て決めた操作（クリック、文字入力、キー操作）を実機に反映する。`screen-capture` で画面を「見て」、このスキルで「操作」する。 Use when: ユーザーが「クリックして」「ここに入力して」「このボタンを押して」と画面操作を依頼したとき; アプリやブラウザをマウス/キーボードで操作する必要があるとき; 画面を確認しながら一連の操作を進めたいとき."
+allowed-tools: get_screen_info move_mouse click type_text press_keys
+metadata:
+  author: little-agent
+  version: "1.0"
+---
+# Computer Use
 
 ## When to use
 - ユーザーが「クリックして」「ここに入力して」「このボタンを押して」と画面操作を依頼したとき
 - アプリやブラウザをマウス/キーボードで操作する必要があるとき
 - 画面を確認しながら一連の操作を進めたいとき
-
-## Allowed tools
-- get_screen_info
-- move_mouse
-- click
-- type_text
-- press_keys
 
 ## Setup
 このスキルにはマウス/キーボード操作用のライブラリが必要です。
@@ -23,7 +21,7 @@
 GUI セッションが必要です。ヘッドレス環境では操作できません。
 
 ## Instructions
-- 操作の前に `take_screenshot`（screen_capture スキル）で現在の画面を確認する。
+- 操作の前に `take_screenshot`（screen-capture スキル）で現在の画面を確認する。
 - クリック対象の座標を決める前に `get_screen_info` で実解像度とカーソル位置を確認する。
 - 座標は **実画面ピクセル** で渡す。`take_screenshot` の画像が縮小されている場合（例: `Captured screen 1568x882`）、その画像上で読み取った座標に加えて `image_size`（例 `[1568, 882]`）を渡せば、ツール側が実解像度へ自動変換する。座標計算を自分でやらないこと。
 - 1操作ごとに screenshot で結果を確認し、次の操作を決める（見る→操作→見る のループ）。

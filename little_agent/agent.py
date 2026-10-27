@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from little_agent import schema as json_schema
@@ -40,6 +41,7 @@ from little_agent.llm import (
 from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.messages import Message, text_content
+from little_agent.skills.activation import ActivateSkillTool
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
@@ -102,6 +104,11 @@ class Agent:
         for tool in self.skills.load_tools():
             if tool.name not in self.tools.names():
                 self.tools.register(tool)
+        # Skills are disclosed progressively: a catalog in the system prompt and
+        # activate_skill to load one. The tool exists only while skills do.
+        self._activation = ActivateSkillTool(self.skills)
+        self._skill_dirs: tuple[Path, ...] = ()
+        self._sync_skills()
         # Memory tools exist only when the store persists something.
         for tool in self.memory.tools():
             self.tools.register(tool)
@@ -143,9 +150,9 @@ class Agent:
             self.logger.log_conversation("user_message", content=prompt)
 
         execution = _Execution()
-        selected_skills = self.skills.select_for_text(prompt)
+        skills = self._sync_skills()
         execution.messages.append(
-            self._system_prompt(selected_skills, output_schema, conversational=bool(history))
+            self._system_prompt(skills, output_schema, conversational=bool(history))
         )
         # A system message inside the caller's history would fight the one above.
         execution.messages.extend(
@@ -276,11 +283,10 @@ class Agent:
 
     def _system_prompt(
         self,
-        selected_skills: list[Any],
+        skills: list[Any],
         output_schema: dict[str, Any] | None = None,
         conversational: bool = False,
     ) -> Message:
-        skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
         opening = (
             "You are Little Agent. You are in a conversation: earlier turns are above, "
             "so resolve references against them."
@@ -295,9 +301,16 @@ class Agent:
             f"Workspace: {self.config.workspace}\n\n"
             f"Readable paths: {_paths_text(self.config.readable_paths)}\n"
             f"Writable paths: {_paths_text(self.config.writable_paths)}\n\n"
-            f"Available tools:\n{self.tools.descriptions()}\n\n"
-            f"Relevant skills:\n{skill_text}"
+            f"Available tools:\n{self.tools.descriptions()}"
         )
+        # Tier 1 of progressive disclosure: names and descriptions only. The
+        # section is left out entirely when there are no skills.
+        catalog = self.skills.catalog_prompt(skills)
+        if catalog:
+            content += (
+                f"\n\n## Skills\n{catalog}\n\n"
+                "Skill directories are readable (not writable) with the file tools."
+            )
         # Empty for the null store, so this whole block vanishes without memory.
         for heading, body in self.memory.sections():
             content += f"\n\n## {heading}\n{body}"
@@ -311,6 +324,21 @@ class Agent:
                 + json.dumps(output_schema, ensure_ascii=False)
             )
         return Message(role="system", content=content)
+
+    # --- skills --------------------------------------------------------------
+
+    def _sync_skills(self) -> list[Any]:
+        """Re-read the skills, and keep activate_skill and its enum in step."""
+
+        skills = self.skills.load_all()
+        self._skill_dirs = tuple(skill.directory for skill in skills if skill.directory is not None)
+        self._activation.begin_run()
+        if skills:
+            self._activation.refresh([skill.name for skill in skills])
+            self.tools.register(self._activation)
+        else:
+            self.tools.unregister(self._activation.name)
+        return skills
 
     # --- tools ---------------------------------------------------------------
 
@@ -354,7 +382,9 @@ class Agent:
             execution.approved = True
         context = ToolContext(
             workspace=self.config.workspace,
-            readable_paths=self.config.readable_paths,
+            # Skill directories are readable so bundled references, scripts and
+            # assets can be loaded on demand; they are never writable.
+            readable_paths=(*self.config.readable_paths, *self._skill_dirs),
             writable_paths=self.config.writable_paths,
             require_confirmation=self.config.require_confirmation,
         )

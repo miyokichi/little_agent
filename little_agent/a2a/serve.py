@@ -48,7 +48,7 @@ def _card_skills(profile: AgentProfile) -> list[dict[str, Any]]:
             agent_skill(
                 skill_id=skill.name,
                 name=skill.name,
-                description=skill.description or skill.when_to_use or skill.name,
+                description=skill.description or skill.name,
                 tags=[tag.strip() for tag in skill.allowed_tools if tag.strip()][:8],
             )
         )

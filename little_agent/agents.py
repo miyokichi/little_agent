@@ -76,6 +76,8 @@ class AgentProfile:
     # profile means none: MCP servers reach outside the workspace, so a profile
     # opts in to each one. The built-in default agent gets all of them.
     mcp_servers: list[str] | None = None
+    # Cross-client skill directories (``.agents/skills``), project then user.
+    shared_skill_dirs: tuple[Path, ...] = ()
     # ``builtin`` marks the virtual "default" agent (the whole library); it has
     # no agent.json on disk and loads every skill in the library.
     builtin: bool = False
@@ -85,32 +87,48 @@ class AgentProfile:
         return self.dir / "skills"
 
     def skill_roots(self) -> list[Path]:
-        """Directories to load skills from, most specific first."""
+        """Directories to load skills from, most specific first (first wins).
 
+        The agent's own ``skills/`` folder, then the project's
+        ``.agents/skills``, then the user's ``~/.agents/skills``, with the
+        library slotted in by scope: a configured or ``<workspace>/skills``
+        library is project-level and goes before the user's directory, the
+        built-in library goes last. So a project overrides the user, and both
+        override what ships with Little Agent. The library itself is still one
+        directory (see ``resolve_skill_library``). A profile that names no
+        skills uses its own folder only.
+        """
+
+        from little_agent.config import builtin_skills_dir
+
+        project_shared = list(self.shared_skill_dirs[:1])
+        user_shared = list(self.shared_skill_dirs[1:])
+        if self.library_dir == builtin_skills_dir():
+            layered = [*project_shared, *user_shared, self.library_dir]
+        else:
+            layered = [*project_shared, self.library_dir, *user_shared]
         if self.builtin:
-            return [self.library_dir]
+            return list(dict.fromkeys(layered))
         roots = [self.own_skills_dir]
         if self.skills is not None:
-            roots.append(self.library_dir)
-        return roots
+            roots.extend(layered)
+        return list(dict.fromkeys(roots))
 
     def skill_names(self) -> set[str] | None:
         return set(self.skills) if self.skills is not None else None
 
     def enabled_skills(self) -> list[str]:
-        """Skill folder names this profile actually resolves to."""
+        """Names of the skills this profile actually resolves to.
 
-        found: set[str] = set()
-        wanted = self.skill_names()
-        for root in self.skill_roots():
-            if not root.exists():
-                continue
-            for path in root.iterdir():
-                if not path.is_dir() or not (path / "SKILL.md").exists():
-                    continue
-                if wanted is None or path.name in wanted:
-                    found.add(path.name)
-        return sorted(found)
+        Goes through the skill loader, so a profile naming the old
+        ``excel_file`` folder still finds the spec-style ``excel-file`` skill.
+        """
+
+        # Imported here: this module stays free of the runtime's imports.
+        from little_agent.skills.loader import SkillLoader
+
+        loader = SkillLoader([root.resolve() for root in self.skill_roots()], names=self.skill_names())
+        return [skill.name for skill in loader.load_all()]
 
     def core_tools_set(self) -> set[str] | None:
         return set(self.core_tools) if self.core_tools is not None else None
@@ -143,7 +161,12 @@ def list_agents(agents_dir: Path) -> list[str]:
     )
 
 
-def load_profile(agents_dir: Path, name: str, library_dir: Path | None = None) -> AgentProfile:
+def load_profile(
+    agents_dir: Path,
+    name: str,
+    library_dir: Path | None = None,
+    shared_skill_dirs: tuple[Path, ...] = (),
+) -> AgentProfile:
     directory = agent_dir(agents_dir, name)
     config_path = directory / AGENT_CONFIG_FILE
     if not config_path.exists():
@@ -169,6 +192,7 @@ def load_profile(agents_dir: Path, name: str, library_dir: Path | None = None) -
         mcp_servers=(
             [str(item) for item in mcp_servers] if isinstance(mcp_servers, list) else None
         ),
+        shared_skill_dirs=tuple(shared_skill_dirs),
     )
 
 
@@ -185,6 +209,7 @@ def default_profile(config: "AgentConfig") -> AgentProfile:
         library_dir=config.skill_library_dir,
         description="All library skills and tools (built-in).",
         builtin=True,
+        shared_skill_dirs=config.shared_skill_dirs,
     )
 
 
@@ -199,4 +224,4 @@ def resolve_active(config: "AgentConfig", requested: str | None) -> AgentProfile
     name = requested or config.active_agent
     if not name or name.strip().lower() in RESERVED_NAMES:
         return default_profile(config)
-    return load_profile(config.agents_dir, name, config.skill_library_dir)
+    return load_profile(config.agents_dir, name, config.skill_library_dir, config.shared_skill_dirs)

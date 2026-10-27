@@ -106,6 +106,9 @@ class AgentConfig:
     # mcp.json files defining MCP servers, merged in order (later names win).
     # Empty means no MCP servers at all.
     mcp_config_paths: tuple[Path, ...] = ()
+    # Cross-client Agent Skills directories: (<workspace>/.agents/skills,
+    # ~/.agents/skills). Empty means none (the default outside from_env).
+    shared_skill_dirs: tuple[Path, ...] = ()
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -174,4 +177,9 @@ class AgentConfig:
                 1, int(os.getenv("LITTLE_AGENT_MAX_PARALLEL_DELEGATIONS", "4"))
             ),
             mcp_config_paths=tuple(dict.fromkeys((global_mcp, project_mcp))),
+            shared_skill_dirs=(
+                ((workspace / ".agents" / "skills").resolve(), (Path.home() / ".agents" / "skills").resolve())
+                if _as_bool(os.getenv("LITTLE_AGENT_SHARED_SKILLS"), True)
+                else ()
+            ),
         )

@@ -42,14 +42,14 @@ class BundledLibraryTests(unittest.TestCase):
         self.assertGreaterEqual(
             folders,
             {
-                "agent_manager",
-                "excel_file",
-                "file_manager",
-                "ppt_file",
-                "project_manager",
-                "python_coder",
-                "windows_operator",
-                "workspace_harness",
+                "agent-manager",
+                "excel-file",
+                "file-manager",
+                "ppt-file",
+                "project-manager",
+                "python-coder",
+                "windows-operator",
+                "workspace-harness",
             },
         )
 

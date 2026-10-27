@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "create_skill",
-      "description": "Create a portable Little Agent skill folder under the workspace skills directory.",
+      "description": "Create an Agent Skills-format skill folder (SKILL.md with YAML frontmatter) under the workspace skills directory.",
       "script": "scripts/skill_creator.py",
       "requires_confirmation": true,
       "parameters": {
@@ -10,11 +10,11 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Skill name. It will be normalized to lowercase letters, digits, hyphens, and underscores."
+            "description": "Skill name. It is normalized to the Agent Skills rule: lowercase letters, digits and single hyphens (max 64)."
           },
           "description": {
             "type": "string",
-            "description": "Short description of what the skill does."
+            "description": "What the skill does AND when to use it, with keywords that help an agent pick it (max 1024 characters)."
           },
           "include_scripts": {
             "type": "boolean",
@@ -48,7 +48,7 @@
     },
     {
       "name": "validate_skill",
-      "description": "Validate a Little Agent skill folder structure.",
+      "description": "Validate a skill folder against the Agent Skills specification (frontmatter fields, naming, tools.json).",
       "script": "scripts/skill_creator.py",
       "requires_confirmation": false,
       "parameters": {

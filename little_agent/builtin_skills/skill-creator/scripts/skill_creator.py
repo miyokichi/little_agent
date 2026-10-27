@@ -81,16 +81,14 @@ def validate_skill(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]
     skill_dir = safe_skill_dir(workspace, name)
     issues: list[str] = []
 
+    warnings: list[str] = []
     skill_md = skill_dir / "SKILL.md"
     if not skill_dir.exists():
         issues.append(f"Missing directory: skills/{name}")
     if not skill_md.exists():
         issues.append(f"Missing file: skills/{name}/SKILL.md")
     else:
-        text = skill_md.read_text(encoding="utf-8")
-        for heading in ["# ", "## Description", "## When to use", "## Allowed tools", "## Instructions"]:
-            if heading not in text:
-                issues.append(f"Missing heading in SKILL.md: {heading.strip()}")
+        validate_frontmatter(skill_md.read_text(encoding="utf-8"), skill_dir.name, issues, warnings)
 
     manifest = skill_dir / "tools.json"
     if manifest.exists():
@@ -105,9 +103,83 @@ def validate_skill(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]
         except json.JSONDecodeError as exc:
             issues.append(f"tools.json is invalid JSON: {exc}")
 
+    notes = "".join(f"\n- warning: {item}" for item in warnings)
     if issues:
-        return {"ok": False, "content": "Validation failed:\n" + "\n".join(f"- {issue}" for issue in issues)}
-    return {"ok": True, "content": f"Skill is valid: skills/{name}"}
+        return {"ok": False, "content": "Validation failed:\n" + "\n".join(f"- {issue}" for issue in issues) + notes}
+    return {"ok": True, "content": f"Skill is valid (Agent Skills format): skills/{name}{notes}"}
+
+
+# Agent Skills specification (https://agentskills.io/specification).
+SPEC_FIELDS = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
+NAME_RULE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def read_frontmatter(text: str) -> dict[str, str] | None:
+    """Top-level ``key: value`` pairs of the YAML frontmatter (None if absent).
+
+    Enough to validate the spec's fields; nested values (``metadata``) and
+    block scalars are recorded as present without being interpreted.
+    """
+
+    lines = text.lstrip("\ufeff").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    fields: dict[str, str] = {}
+    current: str | None = None
+    for line in lines[1:]:
+        if line.strip() in {"---", "..."}:
+            return fields
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line[0] in " \t":
+            if current is not None and fields[current] in {"", "|", ">", "|-", ">-"}:
+                fields[current] = (fields[current].lstrip("|>-") + " " + line.strip()).strip()
+            continue
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        current = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        fields[current] = value
+    raise ValueError("frontmatter is not closed with '---'")
+
+
+def validate_frontmatter(text: str, folder: str, issues: list[str], warnings: list[str]) -> None:
+    try:
+        fields = read_frontmatter(text)
+    except ValueError as exc:
+        issues.append(f"SKILL.md {exc}")
+        return
+    if fields is None:
+        issues.append("SKILL.md must start with YAML frontmatter ('---' ... '---').")
+        return
+    name = fields.get("name", "")
+    if not name:
+        issues.append("Frontmatter is missing 'name'.")
+    else:
+        if len(name) > 64:
+            issues.append("'name' must be at most 64 characters.")
+        if not NAME_RULE.match(name):
+            issues.append("'name' may only contain lowercase letters, digits and single hyphens, not at either end.")
+        if name != folder:
+            issues.append(f"'name' ({name}) must match the directory name ({folder}).")
+    description = fields.get("description", "")
+    if not description:
+        issues.append("Frontmatter is missing 'description'.")
+    elif len(description) > 1024:
+        issues.append("'description' must be at most 1024 characters.")
+    elif len(description) < 40:
+        warnings.append("'description' is short; say what the skill does and when to use it.")
+    if len(fields.get("compatibility", "")) > 500:
+        issues.append("'compatibility' must be at most 500 characters.")
+    unknown = sorted(set(fields) - SPEC_FIELDS)
+    if unknown:
+        warnings.append(f"Fields outside the spec: {', '.join(unknown)} (put custom data under 'metadata').")
+    body = text.split("---", 2)[-1]
+    if len(body.splitlines()) > 500:
+        warnings.append("SKILL.md is over 500 lines; move detail into references/.")
 
 
 def validate_tool_manifest_item(skill_dir: Path, item: Any, issues: list[str]) -> None:
@@ -131,10 +203,12 @@ def safe_skill_dir(workspace: Path, name: str) -> Path:
 
 
 def normalize_name(name: str) -> str:
-    lowered = name.strip().lower().replace(" ", "-")
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", lowered)
-    normalized = re.sub(r"[-_]{2,}", "-", normalized).strip("-_")
-    return normalized[:63]
+    """A spec-valid skill name: lowercase letters, digits and single hyphens."""
+
+    lowered = name.strip().lower()
+    normalized = re.sub(r"[^a-z0-9]+", "-", lowered)
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+    return normalized[:64].strip("-")
 
 
 def write_file(path: Path, content: str, overwrite: bool) -> None:
@@ -144,20 +218,21 @@ def write_file(path: Path, content: str, overwrite: bool) -> None:
 
 
 def skill_markdown(name: str, description: str) -> str:
-    return f"""# {name}
-
-## Description
-{description}
+    title = name.replace("-", " ").title()
+    return f"""---
+name: {name}
+description: {json.dumps(description, ensure_ascii=False)}
+metadata:
+  version: "0.1"
+---
+# {title}
 
 ## When to use
-- TODO: このSkillを使うべきユーザー依頼や状況を書く。
-
-## Allowed tools
-- TODO: 使用してよいTool名を書く。Toolがない場合は `none` と書く。
+- TODO: このSkillを使うべきユーザー依頼や状況を書く（同じ内容を description にも含める）。
 
 ## Instructions
 - TODO: Agentが従う手順、注意点、判断基準を書く。
-- 必要な詳細資料は `references/` に置き、ここから参照する。
+- 必要な詳細資料は `references/` に置き、ここから相対パスで参照する（例: [詳細](references/REFERENCE.md)）。
 - 実行ロジックが必要な場合は `scripts/` と `tools.json` を使う。
 """
 

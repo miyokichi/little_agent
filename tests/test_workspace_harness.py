@@ -8,7 +8,7 @@ from pathlib import Path
 
 from little_agent.config import builtin_skills_dir
 
-SCRIPT = builtin_skills_dir() / "workspace_harness" / "scripts" / "harness_tool.py"
+SCRIPT = builtin_skills_dir() / "workspace-harness" / "scripts" / "harness_tool.py"
 
 
 def call(tool: str, workspace: Path, arguments: dict) -> dict:
@@ -103,7 +103,7 @@ class SkillToolNameUniquenessTests(unittest.TestCase):
         from little_agent.skills.loader import SkillLoader
 
         skills = {s.name for s in SkillLoader(builtin_skills_dir()).load_all()}
-        self.assertIn("workspace_harness", skills)
+        self.assertIn("workspace-harness", skills)
 
 
 if __name__ == "__main__":

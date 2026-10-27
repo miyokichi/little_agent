@@ -84,7 +84,7 @@ class ProfileLoadingTests(unittest.TestCase):
 
             profile = agents.load_profile(agents_dir, "observer", LIBRARY)
 
-            self.assertEqual(profile.enabled_skills(), ["datetime", "excel_file"])
+            self.assertEqual(profile.enabled_skills(), ["datetime", "excel-file"])
             self.assertIn(LIBRARY, profile.skill_roots())
 
     def test_own_skill_folder_is_used_and_shadows_the_library(self) -> None:

@@ -546,7 +546,7 @@ def read_shared(workspace: Path, args: dict[str, Any]) -> dict[str, Any]:
     if not target.is_file():
         return {"ok": False, "content": f"Shared file not found: {rel}"}
     if target.suffix.lower() in BINARY_EXTS:
-        return {"ok": False, "content": f"'{rel}' is a binary/office file; use a dedicated skill (excel_file, ppt_file) to read it."}
+        return {"ok": False, "content": f"'{rel}' is a binary/office file; use a dedicated skill (excel-file, ppt-file) to read it."}
     try:
         return {"ok": True, "content": target.read_text(encoding="utf-8")}
     except UnicodeDecodeError:

@@ -52,12 +52,12 @@ class SkillAndToolTests(unittest.TestCase):
         self.assertGreaterEqual(
             {skill.name for skill in skills},
             {
-                "file_manager",
-                "python_coder",
-                "windows_operator",
-                "skill_creator",
-                "excel_file",
-                "ppt_file",
+                "file-manager",
+                "python-coder",
+                "windows-operator",
+                "skill-creator",
+                "excel-file",
+                "ppt-file",
             },
         )
 

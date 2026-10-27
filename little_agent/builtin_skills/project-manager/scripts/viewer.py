@@ -1,10 +1,10 @@
 """Local web viewer/editor for little_agent projects (data/projects.json).
 
-Run with: python skills/project_manager/scripts/viewer.py [--workspace PATH] [--port N] [--open]
+Run with: python skills/project-manager/scripts/viewer.py [--workspace PATH] [--port N] [--open]
 
-Part of the project_manager skill, not of the little_agent package: the skill
+Part of the project-manager skill, not of the little_agent package: the skill
 owns its viewer so the core runtime never carries a per-skill dependency.
-The project_manager skill's open_project_viewer tool starts this module detached.
+The project-manager skill's open_project_viewer tool starts this module detached.
 Humans get full CRUD here: create projects, add/edit/delete tasks, change status.
 """
 
@@ -367,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # NOTE: keep the storage/migration helpers below in sync with
-# skills/project_manager/scripts/project_tool.py. The duplication is intentional:
+# skills/project-manager/scripts/project_tool.py. The duplication is intentional:
 # skill scripts must not import little_agent so that skill folders stay copy-portable.
 def _projects_path(workspace: Path) -> Path:
     path = (workspace / "data" / "projects.json").resolve()

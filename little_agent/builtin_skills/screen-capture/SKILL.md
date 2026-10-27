@@ -1,15 +1,17 @@
-# screen_capture
-
-## Description
-PC画面のスクリーンショットを取得し、画像を本体モデルに直接渡して画面内容を理解させる。
+---
+name: screen-capture
+description: "PC画面のスクリーンショットを取得し、画像を本体モデルに直接渡して画面内容を理解させる。 Use when: ユーザーが「スクリーンショットを撮って」「画面を保存して」と依頼したとき; 「今の画面を説明して」「画面に何が映っているか教えて」と聞かれたとき; 画面上の表示内容を確認・要約・操作判断したいとき."
+allowed-tools: take_screenshot
+metadata:
+  author: little-agent
+  version: "1.0"
+---
+# Screen Capture
 
 ## When to use
 - ユーザーが「スクリーンショットを撮って」「画面を保存して」と依頼したとき
 - 「今の画面を説明して」「画面に何が映っているか教えて」と聞かれたとき
 - 画面上の表示内容を確認・要約・操作判断したいとき
-
-## Allowed tools
-- take_screenshot
 
 ## Setup
 このスキルにはスクリーンショット用のライブラリが必要です。

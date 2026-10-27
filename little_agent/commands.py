@@ -219,6 +219,13 @@ class CommandRegistry:
             return self.builtins[canonical].handler(ctx, args)
         if name in self.custom:
             return DispatchResult(agent_prompt=self.custom[name].render(args))
+        # /<skill-name> [request]: user-explicit activation. The skill's
+        # instructions are put in front of the request, so the model does not
+        # have to decide to activate it.
+        skill = ctx.agent.skills.get(name)
+        if skill is not None:
+            request = args.strip() or f"Follow the '{skill.name}' skill."
+            return DispatchResult(agent_prompt=f"{skill.activation_content()}\n\n{request}")
         return DispatchResult(
             output=f"Unknown command: /{name}\nType /help to see available commands."
         )
@@ -248,6 +255,11 @@ def _cmd_help(ctx: CommandContext, args: str) -> DispatchResult:
         lines.append(f"  or (global):         {registry.global_commands_dir}")
 
     lines.append("")
+    skills = ctx.agent.skills.load_all()
+    if skills:
+        lines.append(
+            f"Skills: /<skill-name> [request] runs with that skill active ({len(skills)} available, see /skills)."
+        )
     lines.append("Prefix a message with // to send literal text starting with a slash.")
     return DispatchResult(output="\n".join(lines))
 
@@ -262,20 +274,38 @@ def _first_line(text: str, limit: int = 80) -> str:
 
 
 def _cmd_skills(ctx: CommandContext, args: str) -> DispatchResult:
-    skills = ctx.agent.skills.load_all()
-    query = args.strip().lower()
+    loader = ctx.agent.skills
+    skills = loader.load_all()
+    diagnostics = loader.diagnostics()
+    query = args.strip()
+    if query.lower() in {"check", "doctor"}:
+        if not diagnostics:
+            return DispatchResult(output=f"All {len(skills)} skill(s) follow the Agent Skills format.")
+        return DispatchResult(output="\n".join(["Skill diagnostics:", *(f"  {item}" for item in diagnostics)]))
     if query:
-        match = next((s for s in skills if s.name.lower() == query), None)
+        match = loader.get(query)
         if match is None:
-            return DispatchResult(output=f"No skill named '{args.strip()}'. Try /skills for the list.")
-        return DispatchResult(output=match.as_prompt())
+            return DispatchResult(output=f"No skill named '{query}'. Try /skills for the list.")
+        lines = [f"{match.name}  ({match.path})", f"  {match.description}"]
+        for label, value in (("license", match.license), ("compatibility", match.compatibility)):
+            if value:
+                lines.append(f"  {label}: {value}")
+        if match.metadata:
+            lines.append("  metadata: " + ", ".join(f"{k}={v}" for k, v in match.metadata.items()))
+        if match.legacy:
+            lines.append("  (legacy heading format — no YAML frontmatter)")
+        lines.extend(["", match.activation_content()])
+        return DispatchResult(output="\n".join(lines))
     if not skills:
         return DispatchResult(output="No skills loaded.")
     lines = [f"Loaded skills ({len(skills)}):"]
     for skill in skills:
-        lines.append(f"  {skill.name:<22} {_first_line(skill.description)}")
+        flag = "  [legacy]" if skill.legacy else ""
+        lines.append(f"  {skill.name:<24} {_first_line(skill.description)}{flag}")
     lines.append("")
-    lines.append("Use /skills <name> to see a skill's full instructions.")
+    lines.append("/skills <name> shows a skill, /<skill-name> [request] runs with it active.")
+    if diagnostics:
+        lines.append(f"{len(diagnostics)} loading problem(s): /skills check")
     return DispatchResult(output="\n".join(lines))
 
 
@@ -384,7 +414,7 @@ def _cmd_agents(ctx: CommandContext, args: str) -> DispatchResult:
     for name in agent_profiles.list_agents(config.agents_dir):
         try:
             profiles.append(
-                agent_profiles.load_profile(config.agents_dir, name, config.skill_library_dir)
+                agent_profiles.resolve_active(config, name)
             )
         except (OSError, ValueError):
             continue
@@ -534,7 +564,9 @@ def _builtin_commands() -> list[BuiltinCommand]:
     return [
         BuiltinCommand("help", "List available commands.", _cmd_help, aliases=("?",)),
         BuiltinCommand("exit", "Quit the session.", _cmd_exit, aliases=("quit",)),
-        BuiltinCommand("skills", "List loaded skills (/skills <name> for detail).", _cmd_skills),
+        BuiltinCommand(
+            "skills", "List skills (/skills <name> detail, /skills check problems).", _cmd_skills
+        ),
         BuiltinCommand("tools", "List registered tools.", _cmd_tools),
         BuiltinCommand("usage", "Show this session's token usage.", _cmd_usage),
         BuiltinCommand("config", "Show the current configuration.", _cmd_config),

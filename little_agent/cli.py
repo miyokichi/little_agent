@@ -74,11 +74,9 @@ def _select_profile_at_launch(config: AgentConfig, requested: str | None) -> age
     if not choice or choice == "0":
         return agents.default_profile(config)
     if choice.isdigit() and 1 <= int(choice) <= len(available):
-        return agents.load_profile(
-            config.agents_dir, available[int(choice) - 1], config.skill_library_dir
-        )
+        return agents.resolve_active(config, available[int(choice) - 1])
     if choice in available:
-        return agents.load_profile(config.agents_dir, choice, config.skill_library_dir)
+        return agents.resolve_active(config, choice)
     print(f"Unknown selection '{choice}', using '{agents.DEFAULT_AGENT_NAME}'.")
     return agents.default_profile(config)
 
@@ -133,6 +131,9 @@ def chat(args: argparse.Namespace) -> None:
     warning = agent.skills.warning()
     if warning:
         print(warning)
+    problems = agent.skills.diagnostics()
+    if problems:
+        print(f"[skills] {len(problems)} loading problem(s) — see /skills check")
     for line in agent.mcp.warnings() if agent.mcp is not None else ():
         print(line)
     print("Type /help for commands, /exit to quit.\n")
