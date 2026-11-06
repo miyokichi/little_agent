@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from little_agent import schema as json_schema
 from little_agent.config import AgentConfig
@@ -36,7 +36,7 @@ from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.messages import Message, text_content
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
-from little_agent.tools.base import ToolContext, ToolRegistry
+from little_agent.tools.base import ToolContext, ToolRegistry, ToolResult
 
 if TYPE_CHECKING:
     from little_agent.mcp.manager import McpView
@@ -47,6 +47,18 @@ ConfirmCallback = Callable[[str, dict[str, Any]], bool]
 
 class StructuredOutputError(RuntimeError):
     """The final answer did not parse as JSON, or did not match ``output_schema``."""
+
+
+class RunInterrupted(RuntimeError):
+    """A caller's execution policy stopped the loop at a tool boundary."""
+
+
+class RunHooks(Protocol):
+    """Optional caller-owned policy; cached results skip actual execution."""
+
+    def check(self) -> None: ...
+    def before_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult | None: ...
+    def after_tool(self, name: str, arguments: dict[str, Any], result: ToolResult) -> ToolResult | None: ...
 
 
 @dataclass(slots=True)
@@ -60,6 +72,7 @@ class RunResult:
 
     text: str
     data: Any | None = None
+    interrupted: bool = False
 
     def __str__(self) -> str:
         return self.text
@@ -71,6 +84,7 @@ class _Execution:
 
     messages: list[Message] = field(default_factory=list)
     approved: bool = False
+    hooks: RunHooks | None = None
 
 
 class Agent:
@@ -115,6 +129,7 @@ class Agent:
         context: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         history: Sequence[Message] | None = None,
+        hooks: RunHooks | None = None,
     ) -> RunResult:
         """Execute one task and return its result.
 
@@ -136,7 +151,7 @@ class Agent:
         if self.logger:
             self.logger.log_conversation("user_message", content=prompt)
 
-        execution = _Execution()
+        execution = _Execution(hooks=hooks)
         selected_skills = self.skills.select_for_text(prompt)
         execution.messages.append(
             self._system_prompt(selected_skills, output_schema, conversational=bool(history))
@@ -147,7 +162,13 @@ class Agent:
         )
         execution.messages.append(Message(role="user", content=prompt))
 
-        final = self._loop(execution)
+        try:
+            final = self._loop(execution)
+        except RunInterrupted as exc:
+            final = str(exc)
+            if self.logger:
+                self.logger.log_conversation("run_interrupted", reason=final)
+            return RunResult(final, interrupted=True)
         if self.logger:
             self.logger.log_conversation("final_answer", content=final)
         if output_schema is None:
@@ -163,6 +184,8 @@ class Agent:
         self.stop.arm()
         try:
             for step in range(max(self.config.max_tool_steps, 1)):
+                if execution.hooks:
+                    execution.hooks.check()
                 if self.stop.triggered:
                     return self._stop_message()
                 try:
@@ -172,7 +195,20 @@ class Agent:
                         self.logger.log_conversation("llm_error", error=str(exc))
                     return f"LLM request failed: {exc}"
 
-                tool_calls = self._normalize_tool_calls(response.get("tool_calls", []))
+                if not isinstance(response, dict) or not isinstance(response.get("content", ""), str):
+                    raise RunInterrupted("LLM returned an invalid response; execution stopped.")
+                raw_calls = response.get("tool_calls", [])
+                if not isinstance(raw_calls, list) or any(
+                    not isinstance(call, dict) or not isinstance(call.get("name"), str)
+                    or not call.get("name") or not isinstance(call.get("arguments", {}), dict)
+                    for call in raw_calls
+                ):
+                    raise RunInterrupted("LLM returned invalid tool calls; execution stopped.")
+                try:
+                    json.dumps(raw_calls, allow_nan=False)
+                except (TypeError, ValueError) as exc:
+                    raise RunInterrupted("LLM returned non-JSON tool arguments; execution stopped.") from exc
+                tool_calls = self._normalize_tool_calls(raw_calls)
                 content = response.get("content", "").strip()
                 if self.logger:
                     self.logger.log_conversation(
@@ -321,6 +357,11 @@ class Agent:
                 self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
             return f"Unknown tool: {name}", ()
         tool = self.tools.get(name)
+        if execution.hooks:
+            execution.hooks.check()
+            errors = json_schema.validate(arguments, tool.parameters)
+            if errors:
+                raise RunInterrupted("Invalid tool arguments: " + "; ".join(errors))
         if self.config.require_confirmation and tool.requires_confirmation and not execution.approved:
             if not self.confirm(name, arguments):
                 if self.logger:
@@ -334,14 +375,19 @@ class Agent:
             writable_paths=self.config.writable_paths,
             require_confirmation=self.config.require_confirmation,
         )
+        cached = execution.hooks.before_tool(name, arguments) if execution.hooks else None
+        if cached is not None:
+            if self.logger:
+                self.logger.log_tool("tool_reused", tool=name, arguments=arguments)
+            return f"{'OK' if cached.ok else 'ERROR'}: {cached.content}", cached.images
         try:
             result = tool.run(context, **arguments)
+        except RunInterrupted:
+            raise
         except Exception as exc:  # noqa: BLE001 - surfaced to the model as tool failure text.
             if self.logger:
                 self.logger.log_tool("tool_error", tool=name, arguments=arguments, error=str(exc))
-            return f"Tool failed: {exc}", ()
-        prefix = "OK" if result.ok else "ERROR"
-        output = f"{prefix}: {result.content}"
+            result = ToolResult(False, f"Tool failed: {exc}")
         if self.logger:
             self.logger.log_tool(
                 "tool_result",
@@ -351,6 +397,10 @@ class Agent:
                 content=result.content,
                 images=len(result.images),
             )
+        if execution.hooks:
+            result = execution.hooks.after_tool(name, arguments, result) or result
+        prefix = "OK" if result.ok else "ERROR"
+        output = f"{prefix}: {result.content}"
         return output, result.images
 
     @staticmethod

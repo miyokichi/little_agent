@@ -17,7 +17,12 @@ Runtime は**1本**で、その上に **Chat**（人と対話する）、**A2A**
 
 さらに Runtime 自身が **MCPクライアント**でもあり、`mcp.json` に書いたMCPサーバのTool・Resource・Promptをエージェントが使えます（[MCP](#mcpmodel-context-protocol)）。
 
-構成は6つの領域に分かれます。
+学習対応モード `little-agent chat --learning` では、Learning Engineとstdio MCPで接続し、
+仕事の中断・専門家への質問・回答確認・再開・振り返りと知識候補の人間レビューを行います。
+接続先Learning EngineのWorkSession/MCP API実装が必要です。
+設定、通信契約、操作と検証方法は [Learning Engine連携](docs/learning.md) を参照してください。
+
+構成は次の領域に分かれます。
 
 | 領域 | 場所 | 役割 |
 | --- | --- | --- |
@@ -28,6 +33,7 @@ Runtime は**1本**で、その上に **Chat**（人と対話する）、**A2A**
 | **Workspace** | `little_agent/tools/base.py`, `paths.py`, `a2a/grant.py` | 読み書きできる範囲の決定と検証 |
 | **Skills** | `little_agent/skills/`（loader）, `little_agent/builtin_skills/`（実装） | Skill定義とSkill Tool。coreから分離 |
 | **MCP** | `little_agent/mcp/` | MCPクライアント（外部サーバのTool/Resource/Prompt）と `serve-mcp` |
+| **Work** | `little_agent/work/` | Learning Engineとの通信、WorkSession・質問・再開・レビュー |
 
 Runtime 自身は実行の間に何も持ち越しません。会話を続けたい側（Chat）が履歴を保持して渡し、独立させたい側（A2A）は何も渡しません。
 
@@ -65,6 +71,7 @@ LITTLE_AGENT_MODEL=local-model-name
 ```powershell
 little-agent chat                                   # 対話。永続memoryあり
 little-agent chat --no-memory                       # 対話。永続memoryなし
+little-agent chat --learning                        # Learning Engine対応の仕事・質問・人間レビュー
 little-agent serve-a2a --agent observer --port 8801 # A2Aサーバとして公開
 little-agent serve-mcp --agent observer             # MCPサーバ（stdio）として公開
 ```
@@ -75,6 +82,7 @@ little-agent serve-mcp --agent observer             # MCPサーバ（stdio）と
 | --- | --- | --- | --- |
 | `chat` | セッション中は保持 | `FileMemoryStore`（読み書きする） | 会話として連続 |
 | `chat --no-memory` | セッション中は保持 | `NullMemoryStore`（一切触らない） | 会話として連続 |
+| `chat --learning` | 表示用に保持 | 知識はLearning EngineのSQLiteに保存 | WorkCoordinatorのチェックポイントから再開 |
 | `serve-a2a` | 持たない | `NullMemoryStore`（一切触らない） | Taskごとに完全独立 |
 | `serve-mcp` | 持たない | `NullMemoryStore`（一切触らない） | `tools/call` ごとに完全独立 |
 

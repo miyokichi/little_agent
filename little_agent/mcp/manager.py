@@ -165,9 +165,13 @@ class McpView:
     def tools(self) -> list[Any]:
         tools: list[Any] = []
         for state in self.connected:
+            # Reserved for WorkCoordinator, including after refresh/reconnect.
+            if state.config.name == "learning_engine":
+                continue
             tools.extend(McpTool(state, spec) for spec in state.tool_specs)
         with_resources = [
-            state for state in self.connected if state.client is not None and state.client.supports("resources")
+            state for state in self.connected if state.config.name != "learning_engine"
+            and state.client is not None and state.client.supports("resources")
         ]
         if with_resources:
             tools.append(ListMcpResourcesTool(with_resources))
@@ -184,6 +188,8 @@ class McpView:
 
         sections = []
         for state in self.connected:
+            if state.config.name == "learning_engine":
+                continue
             assert state.client is not None
             if state.client.instructions.strip():
                 sections.append(

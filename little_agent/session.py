@@ -18,12 +18,14 @@ is loaded at the start and nothing is written at the end.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from little_agent.agent import Agent, StructuredOutputError
 from little_agent.messages import Message
 
 if TYPE_CHECKING:
     from little_agent.memory.store import MemoryStore
+    from little_agent.work.coordinator import WorkCoordinator
 
 
 class ChatSession:
@@ -34,8 +36,10 @@ class ChatSession:
     little the final answer does not already carry.
     """
 
-    def __init__(self, agent: Agent) -> None:
+    def __init__(self, agent: Agent, coordinator: "WorkCoordinator | None" = None) -> None:
         self.agent = agent
+        self.coordinator = coordinator
+        self.session_id = coordinator.conversation_id if coordinator else str(uuid4())
         self.history: list[Message] = []
         # How much of the transcript the last reflection saw, so ``learn`` is a
         # no-op when nothing has been said since.
@@ -54,15 +58,19 @@ class ChatSession:
         """
 
         self.agent = agent
+        if self.coordinator:
+            self.coordinator.bind(agent)
 
     def send(self, text: str) -> str:
         """Run one turn and return the answer, recording both sides."""
 
         try:
-            result = self.agent.run(text, history=self.history)
+            if self.coordinator:
+                answer = self.coordinator.send(self.agent, text, self.history)
+            else:
+                answer = self.agent.run(text, history=self.history).text
         except StructuredOutputError as exc:
             return f"Structured output error: {exc}"
-        answer = result.text
         self.history.append(Message(role="user", content=text))
         self.history.append(Message(role="assistant", content=answer))
         return answer
@@ -82,7 +90,7 @@ class ChatSession:
         something was actually written, which is never the case with memory off.
         """
 
-        if len(self.history) <= self._learned_upto:
+        if self.coordinator or len(self.history) <= self._learned_upto:
             return False
         # Mark progress even when the store declines, so a no-op is not retried.
         learned = self.memory.learn(self.history, self.agent.llm, self.agent.config.model)
