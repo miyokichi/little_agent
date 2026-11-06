@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "learning_engine": {
+      "command": "${LEARNING_ENGINE_PYTHON}",
+      "args": [
+        "-m", "learning_engine", "--db", "${LEARNING_ENGINE_DB}", "serve-mcp"
+      ],
+      "require_confirmation": true,
+      "tools": [
+        "le_start_work", "le_get_approved_knowledge", "le_evaluate", "le_pause_work",
+        "le_record_answer", "le_confirm_answer", "le_get_resume_context", "le_resume_work",
+        "le_record_progress", "le_finish_work", "le_reflect", "le_get_review",
+        "le_review_candidate", "le_list_work"
+      ]
+    }
+  }
+}

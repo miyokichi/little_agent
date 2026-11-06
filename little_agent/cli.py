@@ -101,11 +101,21 @@ def chat(args: argparse.Namespace) -> None:
     config.workspace.mkdir(parents=True, exist_ok=True)
     stop = StopController(config.stop_hotkey)
     confirm = _make_confirm(config.stop_hotkey)
-    memory = build_memory_store(config, enabled=not args.no_memory)
+    learning = getattr(args, "learning", False)
+    # Learning Engine owns learned domain knowledge in this opt-in mode.
+    memory = build_memory_store(config, enabled=not args.no_memory and not learning)
 
     profile = _select_profile_at_launch(config, args.agent)
     agent = build_agent(config, profile, confirm, stop, memory=memory)
-    session = ChatSession(agent)
+    coordinator = None
+    if learning:
+        from little_agent.mcp.manager import shared_manager
+        from little_agent.work import LearningClient, WorkCoordinator
+
+        coordinator = WorkCoordinator(LearningClient(shared_manager(config)),
+                                      config.workspace / "data" / "work" / "checkpoint.json")
+        coordinator.bind(agent)
+    session = ChatSession(agent, coordinator=coordinator)
     registry = CommandRegistry(config.commands_dir, config.global_commands_dir)
     ctx = CommandContext(session=session, registry=registry, active_agent=profile.name)
 
@@ -127,6 +137,9 @@ def chat(args: argparse.Namespace) -> None:
     print(f"Skills: {describe_skill_library(config)}")
     print(f"Active agent: {ctx.active_agent}")
     print(f"Memory: {memory.describe()}")
+    if coordinator:
+        print("Learning: enabled (Learning Engine専用保存、/work で操作)")
+        print(coordinator.status())
     if agent.mcp is not None:
         print(f"MCP: {agent.mcp.describe()}")
     print(f"Emergency stop while the agent acts: {config.stop_hotkey}")
@@ -137,7 +150,11 @@ def chat(args: argparse.Namespace) -> None:
         print(line)
     print("Type /help for commands, /exit to quit.\n")
 
-    _repl(ctx)
+    try:
+        _repl(ctx)
+    finally:
+        if coordinator:
+            coordinator.close()
 
     if memory.enabled:
         try:
@@ -158,6 +175,16 @@ def _repl(ctx: CommandContext) -> None:
         if not user_text:
             continue
 
+        coordinator = ctx.session.coordinator
+        # While a question is pending, preserve literal answers (including
+        # slash-prefixed paths and custom-command names) before prompt expansion.
+        trusted = user_text.split(maxsplit=1)[0].lower()
+        if coordinator and coordinator.work and coordinator.work.questions and trusted not in {
+            "/work", "/help", "/?", "/exit", "/quit", "/mcp",
+        }:
+            print(ctx.session.send(user_text))
+            print()
+            continue
         result = ctx.registry.dispatch(ctx, user_text)
         if result is None:
             print(ctx.session.send(user_text))
@@ -174,6 +201,8 @@ def _repl(ctx: CommandContext) -> None:
 
 def _add_chat_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--agent", help="Name of the agent profile to run (under agents/).")
+    parser.add_argument("--learning", action="store_true",
+                        help="Learning EngineによるWorkSessionと人間レビューを有効化する。")
     parser.add_argument(
         "--no-memory",
         action="store_true",

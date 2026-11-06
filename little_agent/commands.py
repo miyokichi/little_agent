@@ -256,6 +256,13 @@ def _cmd_exit(ctx: CommandContext, args: str) -> DispatchResult:
     return DispatchResult(should_exit=True)
 
 
+def _cmd_work(ctx: CommandContext, args: str) -> DispatchResult:
+    coordinator = ctx.session.coordinator
+    if coordinator is None:
+        return DispatchResult(output="学習対応モードは little-agent chat --learning で開始してください。")
+    return DispatchResult(output=coordinator.command(ctx.agent, args))
+
+
 def _first_line(text: str, limit: int = 80) -> str:
     line = text.strip().splitlines()[0].strip() if text.strip() else ""
     return line if len(line) <= limit else line[: limit - 1] + "…"
@@ -533,6 +540,7 @@ def _cmd_mcp(ctx: CommandContext, args: str) -> DispatchResult:
 def _builtin_commands() -> list[BuiltinCommand]:
     return [
         BuiltinCommand("help", "List available commands.", _cmd_help, aliases=("?",)),
+        BuiltinCommand("work", "仕事の開始・中断・再開・完了・学習候補レビュー (--learning).", _cmd_work),
         BuiltinCommand("exit", "Quit the session.", _cmd_exit, aliases=("quit",)),
         BuiltinCommand("skills", "List loaded skills (/skills <name> for detail).", _cmd_skills),
         BuiltinCommand("tools", "List registered tools.", _cmd_tools),
