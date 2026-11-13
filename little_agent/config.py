@@ -99,6 +99,12 @@ class AgentConfig:
         default_factory=lambda: Path.home() / ".little_agent" / "profile.md"
     )
     enable_auto_learning: bool = True
+    memory_backend: str = "file"
+    hindsight_url: str = "http://127.0.0.1:8888"
+    hindsight_bank_id: str = "little-agent"
+    hindsight_api_key: str | None = field(default=None, repr=False)
+    hindsight_timeout_seconds: int = 30
+    hindsight_max_tokens: int = 1500
     # How deep delegate_task may nest sub-agents (0 disables delegation entirely).
     max_delegation_depth: int = 2
     # How many subtasks delegate_tasks runs concurrently.
@@ -169,6 +175,12 @@ class AgentConfig:
             global_memory_path=global_memory_path,
             global_profile_path=global_profile_path,
             enable_auto_learning=_as_bool(os.getenv("LITTLE_AGENT_AUTO_LEARNING"), True),
+            memory_backend=os.getenv("LITTLE_AGENT_MEMORY_BACKEND", "file").strip().lower(),
+            hindsight_url=os.getenv("LITTLE_AGENT_HINDSIGHT_URL", "http://127.0.0.1:8888"),
+            hindsight_bank_id=os.getenv("LITTLE_AGENT_HINDSIGHT_BANK_ID", "little-agent"),
+            hindsight_api_key=os.getenv("LITTLE_AGENT_HINDSIGHT_API_KEY") or None,
+            hindsight_timeout_seconds=int(os.getenv("LITTLE_AGENT_HINDSIGHT_TIMEOUT_SECONDS", "30")),
+            hindsight_max_tokens=int(os.getenv("LITTLE_AGENT_HINDSIGHT_MAX_TOKENS", "1500")),
             max_delegation_depth=int(os.getenv("LITTLE_AGENT_MAX_DELEGATION_DEPTH", "2")),
             max_parallel_delegations=max(
                 1, int(os.getenv("LITTLE_AGENT_MAX_PARALLEL_DELEGATIONS", "4"))

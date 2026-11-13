@@ -770,3 +770,63 @@ python -m pytest -q
 - Skill選択はキーワードスコアリング（embedding検索やLLM routingは未実装）
 - Web検索Toolはありません（`fetch_url` によるURL取得のみ）
 - Structured Output に失敗したときの自動リトライは行いません（そのまま失敗として返します）
+
+### Hindsightによる知識・経験の記憶（任意）
+
+既存のHindsightサーバーを起動し、`.env`で保存先を切り替えます。
+little_agent側に追加のDBやSDKは不要です。既存のファイルメモリは移行・削除しません。
+
+```dotenv
+LITTLE_AGENT_MEMORY_BACKEND=hindsight
+LITTLE_AGENT_HINDSIGHT_URL=http://127.0.0.1:8888
+LITTLE_AGENT_HINDSIGHT_BANK_ID=little-agent
+LITTLE_AGENT_HINDSIGHT_API_KEY=
+LITTLE_AGENT_HINDSIGHT_TIMEOUT_SECONDS=30
+LITTLE_AGENT_HINDSIGHT_MAX_TOKENS=1500
+LITTLE_AGENT_AUTO_LEARNING=true
+```
+
+```bash
+little-agent chat
+```
+
+URLはAPIサーバーのルートです（`/v1/default`は付けません）。認証が必要ならAPIキーを設定します。
+Hindsight側のLLM・embedding等はサーバー側で設定してください。
+この接続は標準HTTP APIの`POST /v1/default/banks/{bank_id}/memories/recall`と
+`POST /v1/default/banks/{bank_id}/memories`を使います。
+
+1. 各依頼の開始時、直近の会話とワークスペースを含めて自動検索し、結果をLLMへ渡します。
+2. 作業中はLLMが`hindsight_recall`で追加検索できます。
+3. 教示・訂正はLLMが`hindsight_retain`を呼びます。現在のユーザー発言の引用と、対象・条件を
+   含めた解釈を保存します。引用は実際の発言と照合しますが、意味の正しさはLLMの判断です。
+4. 正常に最終回答が返った時点で、ツール結果を含む振り返りをLLMに依頼します。
+   回答待ち・作業未完了・再利用する経験なしの場合は保存しないよう指示します。
+   完了判定もLLMに依存します。停止・ツール回数上限・LLMエラーでは自動振り返りしません。
+
+知識と経験は同じbankです。`teaching` / `correction` / `experience`のタグとメタデータ、
+本文の出典で区別します。別bankや承認台帳は作りません。複数ワークスペースで同じbankを
+指定すると知識が共有されます。ワークスペースは文脈であり、アクセス分離の境界ではありません。
+
+`/remember`または終了時にも振り返りできます。既に振り返った会話は同一プロセス内で重複処理しません。
+同じ内容・文脈・種別の再送は同じdocument_idを使います。訂正は新しい根拠として追記し、
+旧記憶を自動削除しません。矛盾時は適用条件・日付・出典を確認し、不明なら質問します。
+Hindsightの抽出品質、検索への反映、訂正の優先は実サーバーで別途検証してください。
+
+検索障害はLLMに明示して作業を継続し、保存障害はツールエラーまたは警告になります。
+保存APIは同期処理で、タイムアウトは上記設定を使います。タイムアウト後もサーバー側で
+処理が完了する場合があります。常駐の再送キューはありません。
+`LITTLE_AGENT_AUTO_LEARNING=false`では④を停止しますが、①〜③は利用できます。
+`--no-memory`、通常のA2A/MCPサーバー実行ではHindsightへの検索・保存を行いません。
+通常のファイルメモリへ戻す場合は`LITTLE_AGENT_MEMORY_BACKEND=file`にします。
+
+動作確認例（数値はテスト用）：
+
+- 「表TのD列は実測直径、単位µm。0.20未満NG。設計値で代用しない。覚えて」
+- 別のチャットで「表TのD列が0.19µm。判定して」→保存した根拠を検索しNGを回答するか確認。
+- 「0.23は設計値しかない」→実測値を要求するか確認。
+- 「訂正。製品Pでは下限0.22µm。他製品は未確認」→製品Pと他製品を混同しないか確認。
+- サーバーを停止して依頼→記憶検索の障害と知識不足を区別するか確認。
+
+自動テストは`python -m unittest discover -s tests`。
+`test_hindsight.py`はローカルHTTPスタブとスクリプト化したLLMで4つの接続点・障害・重複・
+メモリ無効化を検証します。実Hindsight/実LLMの知識獲得性能を証明するテストではありません。

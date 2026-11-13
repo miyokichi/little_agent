@@ -90,7 +90,14 @@ def build_memory_store(config: AgentConfig, enabled: bool) -> MemoryStore:
     write" — the files are never opened and the memory tools do not exist.
     """
 
-    return FileMemoryStore.from_config(config) if enabled else NullMemoryStore()
+    if not enabled:
+        return NullMemoryStore()
+    if config.memory_backend == "hindsight":
+        from little_agent.memory.hindsight import HindsightMemoryStore
+        return HindsightMemoryStore.from_config(config)
+    if config.memory_backend != "file":
+        raise ValueError("LITTLE_AGENT_MEMORY_BACKEND must be file or hindsight")
+    return FileMemoryStore.from_config(config)
 
 
 def chat(args: argparse.Namespace) -> None:
