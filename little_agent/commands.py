@@ -336,6 +336,31 @@ def _paths_text(paths: tuple[Path, ...]) -> str:
     return ", ".join(str(path) for path in paths) if paths else "(none)"
 
 
+def _cmd_add_directory(ctx: CommandContext, args: str) -> DispatchResult:
+    # Do not use POSIX shlex: it consumes Windows backslashes. The rest of
+    # the line is one path, optionally wrapped in matching quotes.
+    path = args.strip()
+    access = "write"
+    for flag, mode in (("--read-only", "read"), ("--read-write", "write"), ("--", "write")):
+        if path == flag or path.startswith(flag + " "):
+            path = path[len(flag):].strip()
+            access = mode
+            break
+    else:
+        if path.startswith("--"):
+            return DispatchResult(output="使い方: /add_directory [--read-only|--read-write] <ディレクトリ>")
+    if len(path) >= 2 and path[0] == path[-1] and path[0] in {'"', "'"}:
+        path = path[1:-1]
+    if not path:
+        return DispatchResult(output="使い方: /add_directory [--read-only|--read-write] <ディレクトリ>")
+    try:
+        directory = ctx.session.add_directory(path, access)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return DispatchResult(output=f"ディレクトリを追加できません: {exc}")
+    mode = "読み取り専用" if access == "read" else "読み書き可能"
+    return DispatchResult(output=f"この会話に追加しました: {directory} ({mode})")
+
+
 def _cmd_clear(ctx: CommandContext, args: str) -> DispatchResult:
     dropped = ctx.session.clear()
     return DispatchResult(
@@ -538,6 +563,7 @@ def _builtin_commands() -> list[BuiltinCommand]:
         BuiltinCommand("tools", "List registered tools.", _cmd_tools),
         BuiltinCommand("usage", "Show this session's token usage.", _cmd_usage),
         BuiltinCommand("config", "Show the current configuration.", _cmd_config),
+        BuiltinCommand("add_directory", "作業ディレクトリを追加 ([--read-only] <path>)。", _cmd_add_directory),
         BuiltinCommand("reload", "Reload custom commands from disk.", _cmd_reload),
         BuiltinCommand("clear", "Clear the conversation (persistent memory is kept).", _cmd_clear),
         BuiltinCommand("memory", "Show what persistent memory holds.", _cmd_memory),

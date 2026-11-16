@@ -36,11 +36,11 @@ def _make_confirm(stop_hotkey: str):
     def _confirm(tool_name: str, arguments: dict[str, Any]) -> bool:
         print(f"\nTool confirmation required: {tool_name}")
         print(json.dumps(arguments, ensure_ascii=False, indent=2))
-        print(
+        print("この会話にディレクトリへのアクセスを追加します。追加は毎回確認します。" if tool_name == "add_directory" else (
             "Approving runs this tool AND auto-approves the rest of this session. "
             f"Emergency stop: {stop_hotkey} (or move the mouse to a screen corner)."
-        )
-        answer = input("Approve for this session? [y/N] ").strip().lower()
+        ))
+        answer = input("Approve? [y/N] ").strip().lower()
         return answer in {"y", "yes"}
 
     return _confirm
@@ -111,22 +111,9 @@ def chat(args: argparse.Namespace) -> None:
     memory = build_memory_store(config, enabled=not args.no_memory)
 
     profile = _select_profile_at_launch(config, args.agent)
-    agent = build_agent(config, profile, confirm, stop, memory=memory)
-    session = ChatSession(agent)
-    registry = CommandRegistry(config.commands_dir, config.global_commands_dir)
-    ctx = CommandContext(session=session, registry=registry, active_agent=profile.name)
-
-    def activate(name: str) -> str:
-        switched = agents.resolve_active(config, name)
-        # The same store: switching agent changes capability, not what is
-        # remembered, and the transcript carries on.
-        session.switch_agent(build_agent(config, switched, confirm, stop, memory=memory))
-        ctx.active_agent = switched.name
-        if switched.builtin:
-            return f"Switched to '{switched.name}' (all library skills & tools)."
-        return f"Switched to agent '{switched.name}' ({len(switched.enabled_skills())} skill(s))."
-
-    ctx.activate = activate
+    ctx = build_chat_context(config, profile, confirm, stop, memory)
+    session = ctx.session
+    agent = ctx.agent
 
     mode = "OpenAI" if config.openai_api_key else "local fallback"
     print(f"Little Agent ({mode})")
@@ -153,6 +140,30 @@ def chat(args: argparse.Namespace) -> None:
         except Exception as exc:  # noqa: BLE001 - never let learning break the exit.
             print(f"[memory] auto-learning skipped: {exc}")
     _shutdown()
+
+
+def build_chat_context(
+    config: AgentConfig, profile: agents.AgentProfile, confirm,
+    stop: StopController, memory: MemoryStore,
+) -> CommandContext:
+    """One chat harness shared by the terminal and the Tkinter UI."""
+    agent = build_agent(config, profile, confirm, stop, memory=memory)
+    session = ChatSession(agent)
+    registry = CommandRegistry(config.commands_dir, config.global_commands_dir)
+    ctx = CommandContext(session=session, registry=registry, active_agent=profile.name)
+
+    def activate(name: str) -> str:
+        switched = agents.resolve_active(config, name)
+        # The same store: switching agent changes capability, not what is
+        # remembered, and the transcript carries on.
+        session.switch_agent(build_agent(config, switched, confirm, stop, memory=memory))
+        ctx.active_agent = switched.name
+        if switched.builtin:
+            return f"Switched to '{switched.name}' (all library skills & tools)."
+        return f"Switched to agent '{switched.name}' ({len(switched.enabled_skills())} skill(s))."
+
+    ctx.activate = activate
+    return ctx
 
 
 def _repl(ctx: CommandContext) -> None:
@@ -215,6 +226,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_chat_arguments(
         subcommands.add_parser("chat", help="Interactive chat (the default with no subcommand).")
     )
+    _add_chat_arguments(
+        subcommands.add_parser("gui", help="Python/TkinterのChat UIを起動する。")
+    )
     a2a_serve.add_arguments(
         subcommands.add_parser("serve-a2a", help="Serve this agent over the A2A protocol.")
     )
@@ -233,6 +247,11 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "serve-mcp":
         mcp_server.run(args)
+        return
+    if args.command == "gui":
+        from little_agent.gui import launch
+
+        launch(args)
         return
     chat(args)
 

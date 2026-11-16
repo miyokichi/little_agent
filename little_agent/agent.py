@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from little_agent import schema as json_schema
@@ -107,6 +108,7 @@ class Agent:
         self._register_mcp_tools()
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
+        self.directory_adder: Callable[[str, str], Path] | None = None
         self.stop = stop or StopController(config.stop_hotkey)
         self.logger = RunLogger(config.log_dir or (config.workspace / "logs")) if config.enable_logging else None
 
@@ -131,6 +133,7 @@ class Agent:
         nothing.
         """
 
+        self.stop.reset()
         if self.mcp is not None and self.mcp.refresh():
             self._register_mcp_tools()
         prompt = self._compose_prompt(instruction, context)
@@ -172,7 +175,6 @@ class Agent:
 
         messages = execution.messages
         final = ""
-        self.stop.reset()
         self.stop.arm()
         try:
             for step in range(max(self.config.max_tool_steps, 1)):
@@ -335,18 +337,23 @@ class Agent:
                 self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
             return f"Unknown tool: {name}", ()
         tool = self.tools.get(name)
-        if self.config.require_confirmation and tool.requires_confirmation and not execution.approved:
+        always_confirm = getattr(tool, "always_confirm", False)
+        if tool.requires_confirmation and (
+            always_confirm or (self.config.require_confirmation and not execution.approved)
+        ):
             if not self.confirm(name, arguments):
                 if self.logger:
                     self.logger.log_tool("tool_cancelled", tool=name, arguments=arguments)
                 return "Cancelled by user.", ()
             # Approval covers the rest of this execution only.
-            execution.approved = True
+            if not always_confirm:
+                execution.approved = True
         context = ToolContext(
             workspace=self.config.workspace,
             readable_paths=self.config.readable_paths,
             writable_paths=self.config.writable_paths,
             require_confirmation=self.config.require_confirmation,
+            add_directory=self.directory_adder,
         )
         try:
             result = tool.run(context, **arguments)

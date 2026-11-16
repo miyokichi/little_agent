@@ -65,6 +65,7 @@ LITTLE_AGENT_MODEL=local-model-name
 ```powershell
 little-agent chat                                   # 対話。永続memoryあり
 little-agent chat --no-memory                       # 対話。永続memoryなし
+little-agent gui                                    # Python/TkinterのChat UI
 little-agent serve-a2a --agent observer --port 8801 # A2Aサーバとして公開
 little-agent serve-mcp --agent observer             # MCPサーバ（stdio）として公開
 ```
@@ -182,6 +183,31 @@ writable  = workspace + LITTLE_AGENT_WRITABLE_PATHS
 - 到達できる範囲は、そのまま**A2Aで他エージェントに渡せる範囲**になります（[workspace / allowed_paths](#ワークの受け渡し先を指定するworkspace--allowed_paths)）。書けるパスは作業場所として、読めるパスは参照用として渡せます。
 - 有効な範囲は system prompt にも出るので、モデルは自分がどこまで触れるかを知った上で動きます。
 
+### 会話中のディレクトリ追加
+
+CLI・GUIのどちらでも、起動し直さずに作業範囲を追加できます。
+
+```text
+/add_directory "D:\projects\追加の作業場所"
+/add_directory --read-only "D:\reference\参考資料"
+```
+
+省略時は読み書き可能です。既存のディレクトリのみ追加でき、相対パスはworkspace基準、
+`~` はホーム基準で解決します。空白・日本語・Windowsのバックスラッシュを含むパスに対応します。
+実際のworkspaceやカレントディレクトリは変更しません。フォルダーを作成するコマンドではありません。
+`/config` で現在の範囲を確認できます。
+
+エージェントからは `add_directory(path, access="read"|"write")` Toolを使えます。
+このToolは、一括承認済み・通常Toolの確認を無効化している場合も、追加ごとに人間に確認します。
+人間が直接入力した `/add_directory` とGUIのフォルダー選択は、その明示操作で範囲を追加します。
+
+追加はその会話の後続Toolに即時反映し、`/agent` 切り替え・`/clear` 後も維持します。
+設定ファイルや環境変数は書き換えず、新しい会話・再起動・他の会話には引き継ぎません。
+Agent Profileの `core_tools` 許可リストでは `add_directory` も制限できます。
+A2A/MCPで実行される非対話タスクは、このToolで自分の権限を拡張できません。
+委譲元のA2Aパス検査には追加分も反映しますが、委譲先の許可範囲は引き続き別途検査します。
+外部MCPサーバの権限・起動設定や、PowerShell/Skillスクリプト自体のOS権限は変更しません。
+
 ## Tool仕様
 
 Toolは `little_agent/tools` に実装します。各Toolは次の属性とメソッドを持ちます。
@@ -196,6 +222,7 @@ Core Tool:
 
 | Tool | 内容 | 確認 |
 | --- | --- | --- |
+| `add_directory` | 対話中のアクセス可能ディレクトリを追加 | 毎回必要（通常の一括承認の対象外） |
 | `list_dir` | ディレクトリ一覧 | 不要 |
 | `read_file` | UTF-8テキストファイルを読む | 不要 |
 | `write_file` | UTF-8テキストファイルを書く | 必要 |
@@ -673,6 +700,32 @@ little-agent chat --no-memory
 
 `>` プロンプトで入力します。**会話は続きます**（前のターンの内容は次のターンでも参照できます）。一方で、Tool実行の途中経過は次のターンには持ち越しません — 残るのはユーザー発言とAgentの最終回答だけです。
 
+### PythonのChat GUI
+
+```powershell
+little-agent gui
+little-agent gui --agent office
+little-agent gui --no-memory
+little-agent gui --readable-path D:\reference --writable-path D:\outputs
+```
+
+標準ライブラリのTkinterを使うローカルのデスクトップアプリです。ブラウザやWebサーバは不要です。
+CLIと同じ `.env`・Agent Profile・ChatSession・MCP・Memoryを使用します。
+`LITTLE_AGENT_MEMORY_BACKEND=hindsight` もそのまま使えます。
+GUI専用のPython依存パッケージはありません。WindowsではPythonのTcl/Tk機能、
+Linuxでは `python3-tk` とデスクトップ環境が必要です。
+
+- 「送信」またはCtrl+Enter（macOSではCommand+Enterも可）で送信、Enterで改行。
+- 上部の選択欄でAgentを切り替え。「フォルダー追加」で作業範囲を追加できます。
+- 「読み取り専用」を選んでから追加すると、参考資料のフォルダーとして登録します。
+- Tool実行の承認はダイアログで行います。`/help` やカスタムスラッシュコマンドも入力できます。
+- 「停止」は停止を要求し、次のTool実行前に止めます。実行中の外部Toolや通信を強制終了するものではありません。
+- 「会話をクリア」は会話の表示と履歴を消します。追加したディレクトリと永続Memoryは維持します。
+- 終了時は処理を止め、既存のMemory保存とMCP/A2Aの終了処理を行います。
+
+LLM・MCP・Memoryの処理は専用スレッドで実行するため、待ち時間もウィンドウ操作が可能です。
+画像Toolの出力はLLMへ従来どおり渡しますが、この簡易UIでは最終回答のテキストを表示します。
+
 ### スラッシュコマンド
 
 `>` プロンプトで `/` から始まる入力は **スラッシュコマンド** として扱われます。
@@ -691,6 +744,7 @@ little-agent chat --no-memory
 | `/tools` | | 登録済みToolを一覧 |
 | `/usage` | | 当セッションのtoken累計を表示 |
 | `/config` | | model・workspace・memory状態などの設定を表示 |
+| `/add_directory <path>` | | この会話の作業範囲を追加（`--read-only` で読み取り専用） |
 | `/reload` | | `commands/*.md` を再読込 |
 | `/clear` | | 会話をリセット（永続memoryは消しません） |
 | `/memory` | | 永続memoryの内容を表示（OFFならその旨を表示） |
@@ -716,6 +770,7 @@ description: 指定ファイルをレビューして改善点を優先度付き�
 ### 承認と緊急停止
 
 - **実行内の一括承認**: 確認が必要なToolを最初に実行するとき一度だけ確認し、承認するとその実行の残りは再確認しません（PC操作中にカーソルを奪い合わないため）。
+- `add_directory` Toolだけは、アクセス範囲を広げるため、常に追加ごとの確認が必要です。
 - **緊急停止ホットキー**: エージェントが動作している間だけ有効なグローバルホットキー（既定 `Ctrl+Alt+Q`、`LITTLE_AGENT_STOP_HOTKEY`）。Tool実行の合間で中断します。`pynput` を使うため標準の依存に含まれます。
 - `computer_use` 使用時は、マウスを画面の隅へ動かすと pyautogui の failsafe が即アボートします。
 
@@ -749,6 +804,8 @@ python -m pytest -q
 | `tests/test_schema.py` | 内蔵JSON Schemaバリデータ |
 | `tests/test_agents.py` | Agent Profile（Skill/Tool/委譲の制限、profile解決） |
 | `tests/test_commands.py` | スラッシュコマンド |
+| `tests/test_directories.py` | 会話中のパス追加、確認・拒否・読取専用、即時反映、会話分離、A2A委譲元の更新 |
+| `tests/test_gui.py` | GUIワーカー、Hindsight、確認・停止・終了と実際のTkウィンドウ操作（LinuxでDISPLAYがない場合はウィンドウテストのみskip） |
 | `tests/test_workspace_harness.py` | `workspace_harness` Skillのタスクフォルダ操作 |
 | `tests/test_mcp.py` | mcp.json、MCPクライアント（stdio実プロセス / Streamable HTTPのJSON・SSE）、Tool/Resource/Prompt、Profile選択、`/mcp`、`serve-mcp`（実プロセスでのクライアント↔サーバ往復を含む） |
 

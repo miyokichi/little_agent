@@ -23,7 +23,7 @@ depth travels in the message metadata so hand-off chains cannot recurse forever.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from little_agent.a2a.client import A2AClientError
@@ -109,7 +109,7 @@ class _DelegationRunner:
     def _should_stop(self) -> bool:
         return bool(self._stop is not None and self._stop.triggered)
 
-    def run_one(self, spec: dict[str, Any]) -> _Outcome:
+    def run_one(self, spec: dict[str, Any], context: ToolContext | None = None) -> _Outcome:
         task_text = str(spec.get("task") or "").strip()
         agent_name = str(spec.get("agent") or "").strip() or None
         agent_url = str(spec.get("agent_url") or "").strip() or None
@@ -120,7 +120,12 @@ class _DelegationRunner:
             return _Outcome(label, False, "task is required.")
 
         try:
-            grant = self._policy.authorize(
+            policy = self._policy if context is None else GrantPolicy.from_config(
+                replace(self._config, workspace=context.workspace,
+                        readable_paths=tuple(dict.fromkeys((*self._config.readable_paths, *context.readable_paths))),
+                        writable_paths=tuple(dict.fromkeys((*self._config.writable_paths, *context.writable_paths))))
+            )
+            grant = policy.authorize(
                 WorkGrant.request(
                     self._config.workspace,
                     workspace=spec.get("workspace"),
@@ -172,12 +177,12 @@ class _DelegationRunner:
             return _Outcome(label, False, f"task {state}: {text}")
         return _Outcome(label, True, text)
 
-    def run_many(self, specs: list[dict[str, Any]]) -> list[_Outcome]:
+    def run_many(self, specs: list[dict[str, Any]], context: ToolContext | None = None) -> list[_Outcome]:
         """Run subtasks concurrently, preserving the caller's ordering in the results."""
 
         workers = min(len(specs), max(1, self._config.max_parallel_delegations))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="a2a-delegate") as pool:
-            return list(pool.map(self.run_one, specs))
+            return list(pool.map(lambda spec: self.run_one(spec, context), specs))
 
 
 def _peer_hint(peers: list[str]) -> str:
@@ -230,7 +235,7 @@ class DelegateTaskTool:
         if self._runner.depth_exceeded:
             return ToolResult(False, self._runner.depth_error())
 
-        outcome = self._runner.run_one(kwargs)
+        outcome = self._runner.run_one(kwargs, context)
         if not outcome.ok:
             return ToolResult(False, f"[A2A peer '{outcome.label}'] {outcome.text}")
         return ToolResult(True, f"[A2A peer '{outcome.label}' result]\n{outcome.text}")
@@ -310,7 +315,7 @@ class DelegateTasksTool:
         if self._runner.depth_exceeded:
             return ToolResult(False, self._runner.depth_error())
 
-        outcomes = self._runner.run_many(specs)
+        outcomes = self._runner.run_many(specs, context)
         total = len(outcomes)
         succeeded = sum(1 for outcome in outcomes if outcome.ok)
 

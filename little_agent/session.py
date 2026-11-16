@@ -18,9 +18,12 @@ is loaded at the start and nothing is written at the end.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from dataclasses import replace
+from pathlib import Path
 
 from little_agent.agent import Agent, StructuredOutputError
 from little_agent.messages import Message
+from little_agent.paths import is_within
 
 if TYPE_CHECKING:
     from little_agent.memory.store import MemoryStore
@@ -40,6 +43,9 @@ class ChatSession:
         # How much of the transcript the last reflection saw, so ``learn`` is a
         # no-op when nothing has been said since.
         self._learned_upto = 0
+        self._readable: tuple[Path, ...] = ()
+        self._writable: tuple[Path, ...] = ()
+        self.agent.directory_adder = self.add_directory
 
     @property
     def memory(self) -> "MemoryStore":
@@ -53,7 +59,45 @@ class ChatSession:
         does not cause the earlier turns to be learned twice.
         """
 
+        self.agent.directory_adder = None
         self.agent = agent
+        self.agent.config = replace(
+            agent.config,
+            readable_paths=tuple(dict.fromkeys((*agent.config.readable_paths, *self._readable))),
+            writable_paths=tuple(dict.fromkeys((*agent.config.writable_paths, *self._writable))),
+        )
+        self.agent.directory_adder = self.add_directory
+
+    def add_directory(self, path: str, access: str = "write") -> Path:
+        """Trusted host entry point; the LLM Tool always asks before calling it.
+
+        Changes affect the current chat only. In particular, never modify the
+        caller's frozen config, shared MCP server policy, or other sessions.
+        """
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("ディレクトリのパスを指定してください。")
+        if access not in {"read", "write"}:
+            raise ValueError("access は read または write を指定してください。")
+        directory = Path(path).expanduser()
+        if not directory.is_absolute():
+            directory = self.agent.config.workspace / directory
+        directory = directory.resolve(strict=True)
+        if not directory.is_dir():
+            raise ValueError(f"ディレクトリではありません: {directory}")
+        config = self.agent.config
+        roots = (config.workspace, *config.writable_paths)
+        if access == "read":
+            roots += config.readable_paths
+        if any(is_within(root.resolve(), directory) for root in roots):
+            return directory
+        if access == "read":
+            self._readable = (*self._readable, directory)
+            config = replace(config, readable_paths=(*config.readable_paths, directory))
+        else:
+            self._writable = (*self._writable, directory)
+            config = replace(config, writable_paths=(*config.writable_paths, directory))
+        self.agent.config = config
+        return directory
 
     def send(self, text: str) -> str:
         """Run one turn and return the answer, recording both sides."""
