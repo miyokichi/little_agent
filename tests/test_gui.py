@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import threading
 import time
@@ -114,6 +115,31 @@ def test_gui_cli_options_and_lazy_tk_import():
     args = build_parser().parse_args(["gui", "--agent", "office", "--no-memory", "--writable-path", "extra"])
     assert args.command == "gui" and args.agent == "office"
     assert args.no_memory and args.writable_path == ["extra"]
+
+
+@pytest.mark.skipif(os.name != "nt" or not shutil.which("powershell"),
+                    reason="Requires Windows PowerShell")
+def test_worker_receives_unicode_powershell_result(tmp_path):
+    stop = StopController("x")
+    worker = ChatWorker(lambda confirm: harness(tmp_path, confirm, stop), stop, lambda: None)
+    worker.start()
+    ctx = next_event(worker, "ready")
+    ctx.agent.llm = Replies(
+        batch(tool("run_powershell", command="[Console]::Out.WriteLine('入力結果 😀')")),
+        {"content": "結果を受け取りました 😀", "tool_calls": []},
+    )
+    ctx.agent.llm.complete = Mock(wraps=ctx.agent.llm.complete)
+    try:
+        worker.submit("日本語の出力を確認")
+        assert next_event(worker, "reply") == "結果を受け取りました 😀"
+        messages = ctx.agent.llm.complete.call_args.args[1]
+        results = [message for message in messages if message.role == "tool"]
+        assert len(results) == 1
+        assert "入力結果 😀" in results[0].content
+    finally:
+        worker.close()
+        worker.thread.join(3)
+    assert not worker.thread.is_alive()
 
 
 @pytest.fixture
