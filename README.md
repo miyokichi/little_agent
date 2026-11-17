@@ -36,7 +36,7 @@ Runtime 自身は実行の間に何も持ち越しません。会話を続けた
 - OS: Windowsを主対象
 - Python: 3.10以上
 - Shell tool: PowerShell
-- LLM: OpenAI互換 Chat Completions API
+- LLM: OpenAI互換 Chat Completions / Responses API
 - HTTP client: Python標準ライブラリの `urllib`（OpenAI SDK不使用、A2Aサーバも `http.server`）
 - APIキーがない場合: 簡易ローカルフォールバックで日時取得やディレクトリ一覧のみ試せます
 
@@ -59,6 +59,21 @@ LITTLE_AGENT_MODEL=local-model-name
 ```
 
 注意: このAgentはTool実行のために `tools` / `tool_calls` を使います。互換API側がtool callingに対応していない場合、通常の返答はできてもTool実行は動かない可能性があります。
+
+Responses APIを使う場合は `.env` に `LITTLE_AGENT_API_MODE=responses` を設定し、Agentを再起動してください。省略時は従来の `chat_completions` です。`/config` で使用中の `api_mode` を確認できます。
+
+```text
+OPENAI_API_KEY=dummy
+OPENAI_BASE_URL=http://192.168.11.12:8080/v1
+LITTLE_AGENT_MODEL=qwen3.8-flash-next
+LITTLE_AGENT_API_MODE=responses
+```
+
+Responsesモードでは `/v1/responses` にアクセスします。回答・画像入力・複数の関数呼び出しに対応し、Tool結果を送信して最終回答まで処理を続けます。reasoningは回答として表示せず、同一実行内の後続リクエストに引き継ぎます。サーバー保存や `previous_response_id` に依存せず、`store=false` で必要な履歴を毎回送信します。サーバー側にも関数呼び出しへの対応が必要です。
+
+CLI・GUIのチャットでは、ツール呼び出しに添えられた文章とツール実行の通知を、最終回答を待たずに表示します。CLIでは `[進捗]` が付き、GUIでは処理中の会話へ順次追加されます。どちらのAPIモードでも利用でき、エージェントの切り替え後やカスタムコマンドからの実行にも適用されます。
+
+AIはチャット専用の `report_progress` ツールで途中報告だけを行い、その後の作業を続けることもできます。通常の文章だけの応答は最終回答または確認質問として終了します。報告にも `LITTLE_AGENT_MAX_TOOL_STEPS` の回数を使うため、長い作業では必要に応じて上限を増やしてください。reasoningは表示しません。文字単位のストリーミングではなく、各AI応答の受信後に途中報告を表示します。
 
 ## 起動モード
 

@@ -71,6 +71,7 @@ class ToolContext:
     require_confirmation: bool = True
     # Set only by an interactive host; A2A/MCP tasks cannot widen their grant.
     add_directory: Callable[[str, str], Path] | None = None
+    report_progress: Callable[[str], None] | None = None
 
     @property
     def path_policy(self) -> PathAccessPolicy:

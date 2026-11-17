@@ -72,6 +72,10 @@ class ChatWorker:
                 request.answer(False)
         self.jobs.put(None)
 
+    def _progress(self, text: str) -> None:
+        if not self.closing.is_set() and not self.stop.triggered:
+            self.events.put(("progress", text))
+
     def _run(self) -> None:
         ctx = None
         try:
@@ -85,12 +89,12 @@ class ChatWorker:
                     result = ctx.registry.dispatch(ctx, text)
                     outputs = []
                     if result is None:
-                        outputs.append(ctx.session.send(text))
+                        outputs.append(ctx.session.send(text, on_progress=self._progress))
                     else:
                         if result.output is not None:
                             outputs.append(result.output)
                         if result.agent_prompt is not None:
-                            outputs.append(ctx.session.send(result.agent_prompt))
+                            outputs.append(ctx.session.send(result.agent_prompt, on_progress=self._progress))
                     self.events.put(("reply", "\n\n".join(outputs)))
                     if result is not None and result.should_exit:
                         self.events.put(("exit", None))
@@ -265,6 +269,8 @@ class ChatWindow:
                         self.append("error", warning)
                 self._set_busy(False)
                 self.input.focus_set()
+            elif kind == "progress":
+                self.append("assistant", value)
             elif kind == "reply":
                 if self._pending_text == "/clear":
                     self.transcript.configure(state="normal")

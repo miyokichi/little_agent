@@ -166,6 +166,10 @@ def build_chat_context(
     return ctx
 
 
+def _print_progress(text: str) -> None:
+    print(f"[進捗] {text}", flush=True)
+
+
 def _repl(ctx: CommandContext) -> None:
     while True:
         try:
@@ -178,13 +182,13 @@ def _repl(ctx: CommandContext) -> None:
 
         result = ctx.registry.dispatch(ctx, user_text)
         if result is None:
-            print(ctx.session.send(user_text))
+            print(ctx.session.send(user_text, on_progress=_print_progress))
             print()
             continue
         if result.output is not None:
             print(result.output)
         if result.agent_prompt is not None:
-            print(ctx.session.send(result.agent_prompt))
+            print(ctx.session.send(result.agent_prompt, on_progress=_print_progress))
         if result.should_exit:
             return
         print()

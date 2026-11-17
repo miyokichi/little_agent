@@ -18,6 +18,7 @@ is loaded at the start and nothing is written at the end.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -99,11 +100,11 @@ class ChatSession:
         self.agent.config = config
         return directory
 
-    def send(self, text: str) -> str:
+    def send(self, text: str, on_progress: Callable[[str], None] | None = None) -> str:
         """Run one turn and return the answer, recording both sides."""
 
         try:
-            result = self.agent.run(text, history=self.history)
+            result = self.agent.run(text, history=self.history, on_progress=on_progress)
         except StructuredOutputError as exc:
             return f"Structured output error: {exc}"
         answer = result.text

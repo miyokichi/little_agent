@@ -318,6 +318,7 @@ def _cmd_config(ctx: CommandContext, args: str) -> DispatchResult:
         f"  max_tool_steps     : {config.max_tool_steps}",
         f"  enable_logging     : {config.enable_logging}",
         f"  base_url           : {config.openai_base_url}",
+        f"  api_mode           : {config.api_mode}",
         f"  api_key            : {'set' if config.openai_api_key else 'not set (local fallback)'}",
         f"  commands (project) : {config.commands_dir}",
         f"  commands (global)  : {config.global_commands_dir}",
