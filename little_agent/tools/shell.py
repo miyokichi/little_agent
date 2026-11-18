@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 
 from little_agent.tools.base import ToolContext, ToolResult
@@ -39,11 +40,24 @@ class RunPowerShellTool:
             if token.lower() in lowered:
                 return ToolResult(False, f"Blocked potentially destructive command: {token}")
 
+        # Pin both ends of the pipes. Windows PowerShell otherwise uses the
+        # console code page, while Python may decode with a different locale.
+        # Python GUI scripts also need UTF-8 when printing their input results.
+        utf8_setup = (
+            "$OutputEncoding = [Console]::InputEncoding = "
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        )
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         completed = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", command],
+            ["powershell", "-NoProfile", "-Command", utf8_setup + command],
             cwd=context.workspace,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
             timeout=timeout,
             check=False,
         )

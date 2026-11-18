@@ -112,6 +112,11 @@ class AgentConfig:
     # mcp.json files defining MCP servers, merged in order (later names win).
     # Empty means no MCP servers at all.
     mcp_config_paths: tuple[Path, ...] = ()
+    api_mode: str = "chat_completions"
+
+    def __post_init__(self) -> None:
+        if self.api_mode not in {"chat_completions", "responses"}:
+            raise ValueError("LITTLE_AGENT_API_MODE must be chat_completions or responses.")
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -162,6 +167,7 @@ class AgentConfig:
             require_confirmation=_as_bool(os.getenv("LITTLE_AGENT_REQUIRE_CONFIRMATION"), True),
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            api_mode=os.getenv("LITTLE_AGENT_API_MODE", "chat_completions").strip().lower(),
             max_tool_steps=int(os.getenv("LITTLE_AGENT_MAX_TOOL_STEPS", "5")),
             enable_logging=_as_bool(os.getenv("LITTLE_AGENT_ENABLE_LOGGING"), True),
             log_dir=log_dir,

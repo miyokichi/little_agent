@@ -63,4 +63,8 @@ class StopController:
                 pass
 
     def _on_activate(self) -> None:
+        self.request_stop()
+
+    def request_stop(self) -> None:
+        """Request a stop from a UI; observed between Tool calls."""
         self._event.set()

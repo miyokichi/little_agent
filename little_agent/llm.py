@@ -30,6 +30,8 @@ class LLMClient:
 class OpenAICompatibleChatClient(LLMClient):
     """Call an OpenAI-compatible Chat Completions API without the OpenAI SDK."""
 
+    api_label = "Chat completion API"
+
     def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1", timeout: int = 60) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -72,18 +74,18 @@ class OpenAICompatibleChatClient(LLMClient):
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Chat completion API returned HTTP {exc.code}: {detail}") from exc
+            raise RuntimeError(f"{self.api_label} returned HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"Could not reach chat completion API: {exc.reason}") from exc
+            raise RuntimeError(f"Could not reach {self.api_label}: {exc.reason}") from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise RuntimeError(f"Chat completion API timed out after {self.timeout} seconds.") from exc
+            raise RuntimeError(f"{self.api_label} timed out after {self.timeout} seconds.") from exc
 
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Chat completion API returned invalid JSON: {raw[:500]}") from exc
+            raise RuntimeError(f"{self.api_label} returned invalid JSON: {raw[:500]}") from exc
         if not isinstance(parsed, dict):
-            raise RuntimeError("Chat completion API returned a non-object JSON response.")
+            raise RuntimeError(f"{self.api_label} returned a non-object JSON response.")
         return parsed
 
     @staticmethod
@@ -120,6 +122,120 @@ class OpenAICompatibleChatClient(LLMClient):
                 }
             )
         return [call for call in calls if call["name"]]
+
+
+class OpenAICompatibleResponsesClient(OpenAICompatibleChatClient):
+    """Stateless Responses adapter for the same local tool loop as chat.
+
+    Replay output items with each tool result rather than keeping a server-side
+    response ID. Client instances therefore hold no mutable conversation state.
+    """
+
+    api_label = "Responses API"
+
+    def complete(self, model: str, messages: list[Message], tools: ToolRegistry) -> dict[str, Any]:
+        inputs: list[dict[str, Any]] = []
+        for message in messages:
+            inputs.extend(self._input_items(message))
+        body: dict[str, Any] = {
+            "model": model,
+            "input": inputs,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+        }
+        schemas = tools.openai_schemas()
+        if schemas:
+            # Responses functions are flat; preserve optional arguments instead
+            # of allowing the API to normalize them into required properties.
+            body["tools"] = [
+                {"type": "function", **schema["function"], "strict": False}
+                for schema in schemas
+            ]
+            body["tool_choice"] = "auto"
+        response = self._post_json("/responses", body)
+        status = response.get("status")
+        if response.get("error") or status in {"failed", "cancelled", "incomplete"}:
+            detail = response.get("error") or response.get("incomplete_details") or status
+            raise RuntimeError(f"Responses API did not complete: {detail}")
+        if status not in {None, "completed"}:
+            raise RuntimeError(f"Unexpected Responses API status: {status}")
+        output = response.get("output")
+        if not isinstance(output, list):
+            raise RuntimeError("Responses API returned no output array.")
+        texts = []
+        calls = []
+        for item in output:
+            if not isinstance(item, dict):
+                raise RuntimeError("Responses API returned an invalid output item.")
+            if item.get("type") == "message":
+                for block in item.get("content") or []:
+                    if block.get("type") == "output_text":
+                        texts.append(block.get("text") or "")
+                    elif block.get("type") == "refusal":
+                        texts.append(block.get("refusal") or "")
+            elif item.get("type") == "function_call":
+                if item.get("status") not in {None, "completed"}:
+                    raise RuntimeError("Responses API returned an unfinished function call.")
+                if not item.get("call_id") or not item.get("name"):
+                    raise RuntimeError("Responses API returned a function call without call_id or name.")
+                arguments = item.get("arguments") or "{}"
+                # Never repair truncated tool arguments into an executable call.
+                try:
+                    arguments = json.loads(arguments)
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise RuntimeError("Responses API returned invalid function arguments.") from exc
+                if not isinstance(arguments, dict):
+                    raise RuntimeError("Responses API function arguments must be a JSON object.")
+                calls.append({"id": item["call_id"], "name": item["name"], "arguments": arguments})
+        if not any(texts) and not calls:
+            raise RuntimeError("Responses API returned neither an answer nor a function call.")
+        usage = response.get("usage") or {}
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        return {
+            "content": "\n".join(texts),
+            "tool_calls": calls,
+            "responses_output": output,
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": usage.get("total_tokens", input_tokens + output_tokens),
+            } if usage else {},
+        }
+
+    @staticmethod
+    def _input_items(message: Message) -> list[dict[str, Any]]:
+        if message.role == "assistant" and message.responses_output is not None:
+            return message.responses_output
+        if message.role == "tool":
+            if not message.tool_call_id:
+                raise RuntimeError("Responses tool result requires a tool_call_id.")
+            return [{"type": "function_call_output", "call_id": message.tool_call_id,
+                     "output": text_content(message.content)}]
+        items: list[dict[str, Any]] = []
+        content = message.content
+        if isinstance(content, list):
+            blocks = []
+            for block in content:
+                if block.get("type") == "text":
+                    blocks.append({"type": "input_text", "text": block.get("text", "")})
+                elif block.get("type") == "image_url":
+                    image = block["image_url"]
+                    converted = {"type": "input_image", "image_url": image["url"]}
+                    if "detail" in image:
+                        converted["detail"] = image["detail"]
+                    blocks.append(converted)
+                else:
+                    raise RuntimeError(f"Unsupported Responses input block: {block.get('type')}")
+            content = blocks
+        if content or not message.tool_calls:
+            items.append({"role": message.role, "content": content})
+        for call in message.tool_calls or []:
+            converted_call = _openai_tool_call(call)
+            items.append({"type": "function_call", "call_id": converted_call["id"],
+                          "name": converted_call["function"]["name"],
+                          "arguments": converted_call["function"]["arguments"]})
+        return items
 
 
 class LocalRuleClient(LLMClient):

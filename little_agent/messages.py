@@ -18,6 +18,8 @@ class Message:
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    # Original Responses output, including reasoning, replayed within this run.
+    responses_output: list[dict[str, Any]] | None = None
 
 
 def text_content(content: Content) -> str:

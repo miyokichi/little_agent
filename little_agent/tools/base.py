@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -68,6 +69,9 @@ class ToolContext:
     readable_paths: tuple[Path, ...] = field(default_factory=tuple)
     writable_paths: tuple[Path, ...] = field(default_factory=tuple)
     require_confirmation: bool = True
+    # Set only by an interactive host; A2A/MCP tasks cannot widen their grant.
+    add_directory: Callable[[str, str], Path] | None = None
+    report_progress: Callable[[str], None] | None = None
 
     @property
     def path_policy(self) -> PathAccessPolicy:

@@ -25,18 +25,25 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from little_agent import schema as json_schema
 from little_agent.config import AgentConfig
 from little_agent.control import StopController
-from little_agent.llm import LLMClient, LocalRuleClient, OpenAICompatibleChatClient
+from little_agent.llm import (
+    LLMClient,
+    LocalRuleClient,
+    OpenAICompatibleChatClient,
+    OpenAICompatibleResponsesClient,
+)
 from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.messages import Message, text_content
 from little_agent.skills.loader import SkillLoader
 from little_agent.tools import default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
+from little_agent.tools.progress import ReportProgressTool
 
 if TYPE_CHECKING:
     from little_agent.mcp.manager import McpView
@@ -72,6 +79,8 @@ class _Execution:
     messages: list[Message] = field(default_factory=list)
     approved: bool = False
     completed: bool = False
+    on_progress: Callable[[str], None] | None = None
+    tools: ToolRegistry | None = None
 
 
 class Agent:
@@ -107,6 +116,7 @@ class Agent:
         self._register_mcp_tools()
         self.llm = llm or self._default_llm(config)
         self.confirm = confirm or (lambda _name, _args: True)
+        self.directory_adder: Callable[[str, str], Path] | None = None
         self.stop = stop or StopController(config.stop_hotkey)
         self.logger = RunLogger(config.log_dir or (config.workspace / "logs")) if config.enable_logging else None
 
@@ -116,6 +126,7 @@ class Agent:
         context: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         history: Sequence[Message] | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> RunResult:
         """Execute one task and return its result.
 
@@ -131,16 +142,25 @@ class Agent:
         nothing.
         """
 
+        self.stop.reset()
         if self.mcp is not None and self.mcp.refresh():
             self._register_mcp_tools()
         prompt = self._compose_prompt(instruction, context)
         if self.logger:
             self.logger.log_conversation("user_message", content=prompt)
 
-        execution = _Execution()
+        execution = _Execution(on_progress=on_progress)
+        if on_progress is not None:
+            # Keep reporting scoped to this run; served/delegated runs do not
+            # inherit a chat window's callback or mutate the agent's tools.
+            execution.tools = ToolRegistry()
+            for name in self.tools.names():
+                execution.tools.register(self.tools.get(name))
+            execution.tools.register(ReportProgressTool())
         selected_skills = self.skills.select_for_text(prompt)
         execution.messages.append(
-            self._system_prompt(selected_skills, output_schema, conversational=bool(history))
+            self._system_prompt(selected_skills, output_schema, conversational=bool(history),
+                                progress_enabled=on_progress is not None)
         )
         # A system message inside the caller's history would fight the one above.
         execution.messages.extend(
@@ -172,14 +192,13 @@ class Agent:
 
         messages = execution.messages
         final = ""
-        self.stop.reset()
         self.stop.arm()
         try:
             for step in range(max(self.config.max_tool_steps, 1)):
                 if self.stop.triggered:
                     return self._stop_message()
                 try:
-                    response = self.llm.complete(self.config.model, messages, self.tools)
+                    response = self.llm.complete(self.config.model, messages, execution.tools or self.tools)
                 except RuntimeError as exc:
                     if self.logger:
                         self.logger.log_conversation("llm_error", error=str(exc))
@@ -205,7 +224,17 @@ class Agent:
                     final = content
                     break
 
-                messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+                if content and execution.on_progress is not None and not self.stop.triggered:
+                    # A response can contain both narration and function calls.
+                    # Display the narration before running any of those calls.
+                    reports = [str(call["arguments"].get("message", "")).strip()
+                               for call in tool_calls if call["name"] == "report_progress"]
+                    if content not in reports:
+                        execution.on_progress(content)
+                messages.append(Message(
+                    role="assistant", content=content, tool_calls=tool_calls,
+                    responses_output=response.get("responses_output"),
+                ))
                 pending_images: list[tuple[str, str]] = []
                 stopped = False
                 for call in tool_calls:
@@ -225,7 +254,13 @@ class Agent:
                             )
                         )
                         continue
-                    output, images = self._run_tool(execution, call["name"], call.get("arguments", {}))
+                    if execution.on_progress is not None and call["name"] != "report_progress":
+                        execution.on_progress(f"ツール実行: {call['name']}")
+                    if self.stop.triggered:
+                        stopped = True
+                        output, images = self._stop_message(), ()
+                    else:
+                        output, images = self._run_tool(execution, call["name"], call.get("arguments", {}))
                     messages.append(
                         Message(
                             role="tool",
@@ -281,6 +316,7 @@ class Agent:
         selected_skills: list[Any],
         output_schema: dict[str, Any] | None = None,
         conversational: bool = False,
+        progress_enabled: bool = False,
     ) -> Message:
         skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
         opening = (
@@ -300,6 +336,17 @@ class Agent:
             f"Available tools:\n{self.tools.descriptions()}\n\n"
             f"Relevant skills:\n{skill_text}"
         )
+        if progress_enabled:
+            content += (
+                "\n\n## Progress reporting\n"
+                "The report_progress tool shows an intermediate update and continues the task. "
+                "For multi-step work, use it for a brief plan and meaningful milestones. "
+                "You may also attach a brief update to a tool-calling response. "
+                "After reporting, execute the necessary tools and verify the results. "
+                "Do not end with a promise to do work later. A text-only response ends the turn: "
+                "use it for the final result, a direct answer, or a question requiring user input. "
+                "Avoid repetitive updates and leave enough tool steps for the actual work."
+            )
         # Empty for the null store, so this whole block vanishes without memory.
         for heading, body in self.memory.sections():
             content += f"\n\n## {heading}\n{body}"
@@ -330,23 +377,30 @@ class Agent:
     def _run_tool(
         self, execution: _Execution, name: str, arguments: dict[str, Any]
     ) -> tuple[str, tuple[str, ...]]:
-        if name not in self.tools.names():
+        tools = execution.tools or self.tools
+        if name not in tools.names():
             if self.logger:
                 self.logger.log_tool("tool_unknown", tool=name, arguments=arguments)
             return f"Unknown tool: {name}", ()
-        tool = self.tools.get(name)
-        if self.config.require_confirmation and tool.requires_confirmation and not execution.approved:
+        tool = tools.get(name)
+        always_confirm = getattr(tool, "always_confirm", False)
+        if tool.requires_confirmation and (
+            always_confirm or (self.config.require_confirmation and not execution.approved)
+        ):
             if not self.confirm(name, arguments):
                 if self.logger:
                     self.logger.log_tool("tool_cancelled", tool=name, arguments=arguments)
                 return "Cancelled by user.", ()
             # Approval covers the rest of this execution only.
-            execution.approved = True
+            if not always_confirm:
+                execution.approved = True
         context = ToolContext(
             workspace=self.config.workspace,
             readable_paths=self.config.readable_paths,
             writable_paths=self.config.writable_paths,
             require_confirmation=self.config.require_confirmation,
+            add_directory=self.directory_adder,
+            report_progress=execution.on_progress,
         )
         try:
             result = tool.run(context, **arguments)
@@ -417,7 +471,12 @@ class Agent:
     @staticmethod
     def _default_llm(config: AgentConfig) -> LLMClient:
         if config.openai_api_key:
-            return OpenAICompatibleChatClient(
+            client = (
+                OpenAICompatibleResponsesClient
+                if config.api_mode == "responses"
+                else OpenAICompatibleChatClient
+            )
+            return client(
                 api_key=config.openai_api_key,
                 base_url=config.openai_base_url,
                 timeout=config.llm_timeout_seconds,
