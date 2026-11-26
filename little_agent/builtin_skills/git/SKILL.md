@@ -1,3 +1,9 @@
+---
+name: git
+description: 'Gitリポジトリの状態確認、変更のステージング、コミットを支援する。 使用場面: - ワークスペースのgit状態（変更ファイル一覧）を確認したいとき - 変更差分（diff）を確認したいとき - コミット履歴を確認したいとき - ファイルをステージングしてコミットしたいとき'
+allowed-tools: git_status git_diff git_log git_add git_commit
+---
+
 # git
 
 ## Description

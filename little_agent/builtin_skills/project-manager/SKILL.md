@@ -1,4 +1,10 @@
-# project_manager
+---
+name: project-manager
+description: 'プロジェクトとタスクの統合管理。単発TODOから、AIタスクと人間タスクの依存関係付きワークフロー(DAG)まで data/projects.json で一元管理し、進捗の記録とブラウザでの可視化・編集を支援する。計画、段取り、工程管理、承認フロー、タスク分解、進捗確認に対応する。 使用場面: - タスク、TODO、やることリストの追加、確認、完了、削除を頼まれたとき - 複数ステップの計画、プロジェクトの段取り、工程を立てたいとき - AIの作業と人間の承認、レビュー、作業が混ざる進行を管理したいとき - プロジェクト、ワークフロー、依存関係、進捗、可視化、ビューア、ダッシュボードが話題のとき - タスクの状態(着手、完了、失敗、スキップ)や内容(担当、期限、優先度、依存)を記録・変更したいとき'
+allowed-tools: create_project add_task update_task update_task_status add_task_comment show_project list_projects list_tasks delete_task delete_project open_project_viewer
+---
+
+# project-manager
 
 ## Description
 プロジェクトとタスクの統合管理。単発TODOから、AIタスクと人間タスクの依存関係付きワークフロー(DAG)まで data/projects.json で一元管理し、進捗の記録とブラウザでの可視化・編集を支援する。計画、段取り、工程管理、承認フロー、タスク分解、進捗確認に対応する。

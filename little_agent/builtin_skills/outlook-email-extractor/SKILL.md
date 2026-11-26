@@ -1,4 +1,10 @@
-# Outlook メール抽出スキル
+---
+name: outlook-email-extractor
+description: 'Outlook のメール（ライブ Outlook、.pst ファイル）を **件名** と **送信元** でフィルタして抽出し、CSV または JSON として保存します。 使用場面: - Outlook から特定のキーワードを含むメールを抽出したい場合 - .pst アーカイブファイルからメールを検索・抽出したい場合 - 送信元を指定してメールを絞り込みたい場合 - 抽出結果を CSV/JSON でエクスポートしたい場合'
+allowed-tools: extract_emails
+---
+
+# outlook-email-extractor
 
 ## Description
 

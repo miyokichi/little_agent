@@ -1,4 +1,10 @@
-# file_manager
+---
+name: file-manager
+description: 'ファイルの探索、読み取り、検索、簡単な作成や更新を支援する。 使用場面: - ユーザーがファイルやディレクトリの確認を依頼したとき - テキストファイルを読み書きしたいとき - プロジェクト内の文字列を探したいとき'
+allowed-tools: list_dir read_file write_file search_files
+---
+
+# file-manager
 
 ## Description
 ファイルの探索、読み取り、検索、簡単な作成や更新を支援する。

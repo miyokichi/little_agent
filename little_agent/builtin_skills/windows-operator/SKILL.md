@@ -1,4 +1,10 @@
-# windows_operator
+---
+name: windows-operator
+description: 'WindowsとPowerShellを前提にしたローカル操作を支援する。 使用場面: - ユーザーがWindows上の操作やPowerShellコマンドを依頼したとき - ローカル環境の状態確認が必要なとき'
+allowed-tools: run_powershell get_datetime list_dir
+---
+
+# windows-operator
 
 ## Description
 WindowsとPowerShellを前提にしたローカル操作を支援する。

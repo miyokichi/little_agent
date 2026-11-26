@@ -41,6 +41,7 @@ class ChatSession:
     def __init__(self, agent: Agent) -> None:
         self.agent = agent
         self.history: list[Message] = []
+        self._active_skills: tuple[str, ...] = ()
         # How much of the transcript the last reflection saw, so ``learn`` is a
         # no-op when nothing has been said since.
         self._learned_upto = 0
@@ -104,10 +105,12 @@ class ChatSession:
         """Run one turn and return the answer, recording both sides."""
 
         try:
-            result = self.agent.run(text, history=self.history, on_progress=on_progress)
+            result = self.agent.run(text, history=self.history, on_progress=on_progress,
+                                    active_skills=self._active_skills)
         except StructuredOutputError as exc:
             return f"Structured output error: {exc}"
         answer = result.text
+        self._active_skills = result.skills
         self.history.append(Message(role="user", content=text))
         self.history.append(Message(role="assistant", content=answer))
         return answer
@@ -118,6 +121,7 @@ class ChatSession:
         dropped = len(self.history)
         self.history.clear()
         self._learned_upto = 0
+        self._active_skills = ()
         return dropped
 
     def learn(self) -> bool:

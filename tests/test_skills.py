@@ -42,14 +42,14 @@ class BundledLibraryTests(unittest.TestCase):
         self.assertGreaterEqual(
             folders,
             {
-                "agent_manager",
-                "excel_file",
-                "file_manager",
-                "ppt_file",
-                "project_manager",
-                "python_coder",
-                "windows_operator",
-                "workspace_harness",
+                "agent-manager",
+                "excel-file",
+                "file-manager",
+                "ppt-file",
+                "project-manager",
+                "python-coder",
+                "windows-operator",
+                "workspace-harness",
             },
         )
 
@@ -286,10 +286,10 @@ class EmptyLibraryWarningTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             empty = Path(tmp) / "skills"
             empty.mkdir()
-            warning = SkillLoader(empty, names={"datetime", "excel_file"}).warning()
+            warning = SkillLoader(empty, names={"datetime", "excel-file"}).warning()
             self.assertIsNotNone(warning)
             self.assertIn("datetime", warning)
-            self.assertIn("excel_file", warning)
+            self.assertIn("excel-file", warning)
 
 
 class NewSkillTests(unittest.TestCase):
