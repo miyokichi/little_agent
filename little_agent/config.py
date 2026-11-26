@@ -41,14 +41,17 @@ def resolve_skill_library(raw: str | None, workspace: Path) -> Path:
     1. ``LITTLE_AGENT_SKILL_LIBRARY_DIR`` when set — an explicit choice always
        wins, and is honoured even if it does not exist yet (so a typo surfaces
        as an empty library rather than being silently ignored).
-    2. ``<workspace>/skills`` when that directory exists — a project may carry
-       its own library.
-    3. The built-in library shipped with the package.
+    2. ``<workspace>/.agents/skills`` for cross-client interoperability.
+    3. ``<workspace>/skills`` for existing project libraries.
+    4. The built-in library shipped with the package.
     """
 
     if raw and raw.strip():
         path = Path(raw.strip()).expanduser()
         return (path if path.is_absolute() else workspace / path).resolve()
+    interoperable = (workspace / ".agents" / "skills").resolve()
+    if interoperable.is_dir():
+        return interoperable
     workspace_library = (workspace / "skills").resolve()
     if workspace_library.is_dir():
         return workspace_library
@@ -64,7 +67,7 @@ def describe_skill_library(config: "AgentConfig") -> str:
 
     if config.skill_library_dir == builtin_skills_dir():
         origin = "built-in"
-    elif config.skill_library_dir == (config.workspace / "skills").resolve():
+    elif config.skill_library_dir in {(config.workspace / "skills").resolve(), (config.workspace / ".agents" / "skills").resolve()}:
         origin = "workspace"
     else:
         origin = "configured"

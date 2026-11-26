@@ -1,4 +1,10 @@
-# workspace_harness
+---
+name: workspace-harness
+description: '人間とAIが同じディレクトリ上で協働するための、ファイルシステム型タスクハーネス。タスク1つ=1フォルダ(task.md を持つ)として扱い、ディレクトリ構造そのものを真実の源にする。上位のエリア(区分)フォルダは人間が統制し、AIはその中でタスクを作成・提案・更新し、共通資料フォルダを自律的に探索する。 使用場面: - タスクをフォルダ単位で管理したいとき、フォルダを見ながら作業や段取りを進めたいとき - 「どのエリアに何のタスクがあるか」を把握したい、タスクを新設・提案・更新したいとき - 上位のフォルダ構成(エリア)を人間が管理し、AIはその中で動く運用をしたいとき - 共通資料、テンプレート、過去資料など別フォルダの素材を探して使いたいとき - ハーネス、ワークスペース、タスクフォルダ、area、共通資料が話題のとき （依存関係付きDAGや data/projects.json でのプロジェクト管理は project_manager を使う。こちらは「フォルダ=タスク」の運用向け。）'
+allowed-tools: harness_overview list_task_folders read_task_folder create_task_folder update_task_folder add_task_note propose_area search_shared read_shared
+---
+
+# workspace-harness
 
 ## Description
 人間とAIが同じディレクトリ上で協働するための、ファイルシステム型タスクハーネス。タスク1つ=1フォルダ(task.md を持つ)として扱い、ディレクトリ構造そのものを真実の源にする。上位のエリア(区分)フォルダは人間が統制し、AIはその中でタスクを作成・提案・更新し、共通資料フォルダを自律的に探索する。

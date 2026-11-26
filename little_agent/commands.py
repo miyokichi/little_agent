@@ -265,18 +265,30 @@ def _cmd_skills(ctx: CommandContext, args: str) -> DispatchResult:
     skills = ctx.agent.skills.load_all()
     query = args.strip().lower()
     if query:
-        match = next((s for s in skills if s.name.lower() == query), None)
+        match = next((s for s in skills if s.name.lower().replace("_", "-") == query.replace("_", "-")), None)
         if match is None:
             return DispatchResult(output=f"No skill named '{args.strip()}'. Try /skills for the list.")
         return DispatchResult(output=match.as_prompt())
     if not skills:
-        return DispatchResult(output="No skills loaded.")
+        return DispatchResult(output="No skills loaded.\n" + "\n".join(ctx.agent.skills.diagnostics))
     lines = [f"Loaded skills ({len(skills)}):"]
     for skill in skills:
         lines.append(f"  {skill.name:<22} {_first_line(skill.description)}")
     lines.append("")
     lines.append("Use /skills <name> to see a skill's full instructions.")
+    lines.extend(ctx.agent.skills.diagnostics)
     return DispatchResult(output="\n".join(lines))
+
+
+def _cmd_skill(ctx: CommandContext, args: str) -> DispatchResult:
+    words = args.split(maxsplit=1)
+    if not words:
+        return DispatchResult(output="Usage: /skill <name> [task]")
+    try:
+        skill = ctx.agent.skills.get(words[0])
+    except ValueError as exc:
+        return DispatchResult(output=str(exc))
+    return DispatchResult(agent_prompt=f"${skill.name}\n" + (words[1] if len(words) > 1 else "Use this skill for the current task."))
 
 
 def _cmd_tools(ctx: CommandContext, args: str) -> DispatchResult:
@@ -561,6 +573,7 @@ def _builtin_commands() -> list[BuiltinCommand]:
         BuiltinCommand("help", "List available commands.", _cmd_help, aliases=("?",)),
         BuiltinCommand("exit", "Quit the session.", _cmd_exit, aliases=("quit",)),
         BuiltinCommand("skills", "List loaded skills (/skills <name> for detail).", _cmd_skills),
+        BuiltinCommand("skill", "Activate a skill (/skill <name> [task]).", _cmd_skill),
         BuiltinCommand("tools", "List registered tools.", _cmd_tools),
         BuiltinCommand("usage", "Show this session's token usage.", _cmd_usage),
         BuiltinCommand("config", "Show the current configuration.", _cmd_config),

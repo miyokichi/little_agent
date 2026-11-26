@@ -1,4 +1,10 @@
-# python_coder
+---
+name: python-coder
+description: 'Pythonプロジェクトの実装、調査、軽量な修正、実行確認を支援する。 使用場面: - ユーザーがPythonコードの作成や修正を依頼したとき - Pythonのテストやスクリプト実行が必要なとき - 依存関係やパッケージ構成を確認したいとき'
+allowed-tools: list_dir read_file write_file search_files run_powershell
+---
+
+# python-coder
 
 ## Description
 Pythonプロジェクトの実装、調査、軽量な修正、実行確認を支援する。

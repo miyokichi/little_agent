@@ -1,4 +1,10 @@
-# excel_file
+---
+name: excel-file
+description: 'Excel `.xlsx` ファイルの読み取りと、表データからの簡易 `.xlsx` 作成を支援する。 使用場面: - ユーザーがExcelファイルの内容確認、要約、表の読み取りを依頼したとき - 行列データやCSV風テキストからExcelファイルを作りたいとき - 外部ライブラリなしで `.xlsx` を扱いたいとき'
+allowed-tools: read_excel write_excel
+---
+
+# excel-file
 
 ## Description
 Excel `.xlsx` ファイルの読み取りと、表データからの簡易 `.xlsx` 作成を支援する。

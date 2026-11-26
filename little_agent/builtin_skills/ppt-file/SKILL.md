@@ -1,4 +1,10 @@
-# ppt_file
+---
+name: ppt-file
+description: 'PowerPoint `.pptx` ファイルのテキスト読み取りと、タイトル・箇条書きからの簡易 `.pptx` 作成を支援する。 使用場面: - ユーザーがPowerPointファイルの内容確認、要約、スライドテキスト抽出を依頼したとき - タイトルと箇条書きから簡単なPowerPoint資料を作りたいとき - 外部ライブラリなしで `.pptx` を扱いたいとき'
+allowed-tools: read_ppt write_ppt
+---
+
+# ppt-file
 
 ## Description
 PowerPoint `.pptx` ファイルのテキスト読み取りと、タイトル・箇条書きからの簡易 `.pptx` 作成を支援する。

@@ -23,6 +23,7 @@ is nothing at all, and no file is read or written.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,8 @@ from little_agent.logging import RunLogger, estimate_tokens
 from little_agent.memory.store import MemoryStore, NullMemoryStore
 from little_agent.messages import Message, text_content
 from little_agent.skills.loader import SkillLoader
+from little_agent.skills.models import Skill
+from little_agent.skills.tools import ReadSkillTool
 from little_agent.tools import default_tools
 from little_agent.tools.base import ToolContext, ToolRegistry
 from little_agent.tools.progress import ReportProgressTool
@@ -67,6 +70,7 @@ class RunResult:
 
     text: str
     data: Any | None = None
+    skills: tuple[str, ...] = ()
 
     def __str__(self) -> str:
         return self.text
@@ -81,6 +85,7 @@ class _Execution:
     completed: bool = False
     on_progress: Callable[[str], None] | None = None
     tools: ToolRegistry | None = None
+    active_skills: dict[str, Skill] = field(default_factory=dict)
 
 
 class Agent:
@@ -103,9 +108,8 @@ class Agent:
         # ``core_tools`` is a per-agent allowlist for the built-in core tools.
         # Skill script tools are always registered.
         self.tools = tools or default_tools(core_tools)
-        for tool in self.skills.load_tools():
-            if tool.name not in self.tools.names():
-                self.tools.register(tool)
+        self._skill_tools: dict[str, Any] = {}
+        self._register_skill_tools()
         # Memory tools exist only when the store persists something.
         for tool in self.memory.tools():
             self.tools.register(tool)
@@ -127,6 +131,7 @@ class Agent:
         output_schema: dict[str, Any] | None = None,
         history: Sequence[Message] | None = None,
         on_progress: Callable[[str], None] | None = None,
+        active_skills: Sequence[str] | None = None,
     ) -> RunResult:
         """Execute one task and return its result.
 
@@ -143,6 +148,7 @@ class Agent:
         """
 
         self.stop.reset()
+        self._register_skill_tools()
         if self.mcp is not None and self.mcp.refresh():
             self._register_mcp_tools()
         prompt = self._compose_prompt(instruction, context)
@@ -150,18 +156,26 @@ class Agent:
             self.logger.log_conversation("user_message", content=prompt)
 
         execution = _Execution(on_progress=on_progress)
+        # Activation and progress belong to this run, never another A2A task.
+        execution.tools = ToolRegistry()
+        for name in self.tools.names():
+            execution.tools.register(self.tools.get(name))
+        catalog = self.skills.load_all()
+        explicit = {name.replace("_", "-") for name in re.findall(r"(?<![\w-])\$([\w-]+)", instruction)}
+        requested = explicit | {name.replace("_", "-") for name in (active_skills or ())}
+        execution.active_skills = {s.name: s for s in catalog if s.name.replace("_", "-") in requested}
+        if catalog:
+            execution.tools.register(ReadSkillTool(catalog, lambda skill: execution.active_skills.update({skill.name: skill})))
         if on_progress is not None:
-            # Keep reporting scoped to this run; served/delegated runs do not
-            # inherit a chat window's callback or mutate the agent's tools.
-            execution.tools = ToolRegistry()
-            for name in self.tools.names():
-                execution.tools.register(self.tools.get(name))
             execution.tools.register(ReportProgressTool())
-        selected_skills = self.skills.select_for_text(prompt)
         execution.messages.append(
-            self._system_prompt(selected_skills, output_schema, conversational=bool(history),
+            self._system_prompt(catalog, output_schema, conversational=bool(history),
                                 progress_enabled=on_progress is not None)
         )
+        if execution.active_skills:
+            execution.messages[0].content += "\n\n## Active skills\n" + "\n\n".join(
+                s.as_prompt() for s in execution.active_skills.values()
+            )
         # A system message inside the caller's history would fight the one above.
         execution.messages.extend(
             message for message in (history or ()) if message.role != "system"
@@ -177,6 +191,7 @@ class Agent:
         if self.logger:
             self.logger.log_conversation("final_answer", content=final)
         result = RunResult(final) if output_schema is None else self._structured_result(final, output_schema)
+        result.skills = tuple(execution.active_skills)
         finish = getattr(self.memory, "finish_run", None)
         if finish is not None and execution.completed:
             try:
@@ -318,7 +333,6 @@ class Agent:
         conversational: bool = False,
         progress_enabled: bool = False,
     ) -> Message:
-        skill_text = "\n\n".join(skill.as_prompt() for skill in selected_skills) or "(no matching skills)"
         opening = (
             "You are Little Agent. You are in a conversation: earlier turns are above, "
             "so resolve references against them."
@@ -333,9 +347,18 @@ class Agent:
             f"Workspace: {self.config.workspace}\n\n"
             f"Readable paths: {_paths_text(self.config.readable_paths)}\n"
             f"Writable paths: {_paths_text(self.config.writable_paths)}\n\n"
-            f"Available tools:\n{self.tools.descriptions()}\n\n"
-            f"Relevant skills:\n{skill_text}"
+            f"Available tools:\n{self.tools.descriptions()}"
         )
+        if selected_skills:
+            content += (
+                "\n\n## Available skills\n"
+                "When a task matches a skill description, call read_skill with its name to load "
+                "the full instructions before proceeding. Read referenced resources only as needed. "
+                "Resolve relative paths against the skill directory returned by read_skill. "
+                "Skill allowed-tools declarations do not bypass host permissions or confirmations.\n"
+                + json.dumps([{"name": s.name, "description": s.description,
+                               "location": str(s.path.resolve())} for s in selected_skills], ensure_ascii=False)
+            )
         if progress_enabled:
             content += (
                 "\n\n## Progress reporting\n"
@@ -362,6 +385,16 @@ class Agent:
         return Message(role="system", content=content)
 
     # --- tools ---------------------------------------------------------------
+
+    def _register_skill_tools(self) -> None:
+        for name, previous in self._skill_tools.items():
+            if name in self.tools.names() and self.tools.get(name) is previous:
+                self.tools.unregister(name)
+        self._skill_tools = {}
+        for tool in self.skills.load_tools():
+            if tool.name not in self.tools.names():
+                self.tools.register(tool)
+                self._skill_tools[tool.name] = tool
 
     def _register_mcp_tools(self) -> None:
         for name in self._mcp_tool_names:

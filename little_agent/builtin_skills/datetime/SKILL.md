@@ -1,3 +1,9 @@
+---
+name: datetime
+description: '現在の日付・時刻・タイムゾーン情報を返す。 使用場面: - ユーザーが今日の日付や現在時刻を聞いたとき - 曜日や週番号を確認したいとき - タイムゾーンを含めた正確な日時が必要なとき'
+allowed-tools: get_datetime
+---
+
 # datetime
 
 ## Description

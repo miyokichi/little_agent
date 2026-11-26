@@ -1,4 +1,10 @@
-# computer_use
+---
+name: computer-use
+description: 'マウスとキーボードでPCを操作する。画面を見て決めた操作（クリック、文字入力、キー操作）を実機に反映する。`screen_capture` で画面を「見て」、このスキルで「操作」する。 使用場面: - ユーザーが「クリックして」「ここに入力して」「このボタンを押して」と画面操作を依頼したとき - アプリやブラウザをマウス/キーボードで操作する必要があるとき - 画面を確認しながら一連の操作を進めたいとき'
+allowed-tools: get_screen_info move_mouse click type_text press_keys
+---
+
+# computer-use
 
 ## Description
 マウスとキーボードでPCを操作する。画面を見て決めた操作（クリック、文字入力、キー操作）を実機に反映する。`screen_capture` で画面を「見て」、このスキルで「操作」する。

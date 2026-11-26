@@ -100,17 +100,19 @@ class AgentProfile:
     def enabled_skills(self) -> list[str]:
         """Skill folder names this profile actually resolves to."""
 
-        found: set[str] = set()
+        found: dict[str, str] = {}
         wanted = self.skill_names()
+        wanted = {n.replace("_", "-") for n in wanted} if wanted is not None else None
         for root in self.skill_roots():
             if not root.exists():
                 continue
             for path in root.iterdir():
                 if not path.is_dir() or not (path / "SKILL.md").exists():
                     continue
-                if wanted is None or path.name in wanted:
-                    found.add(path.name)
-        return sorted(found)
+                key = path.name.replace("_", "-")
+                if wanted is None or key in wanted:
+                    found.setdefault(key, path.name)
+        return sorted(found.values())
 
     def core_tools_set(self) -> set[str] | None:
         return set(self.core_tools) if self.core_tools is not None else None

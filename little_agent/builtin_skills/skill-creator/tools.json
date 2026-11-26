@@ -10,7 +10,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Skill name. It will be normalized to lowercase letters, digits, hyphens, and underscores."
+            "description": "Skill name. It will be normalized to lowercase letters, digits, and hyphens."
           },
           "description": {
             "type": "string",

@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 def main() -> int:
     try:
@@ -35,8 +37,8 @@ def create_skill(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
     overwrite = bool(arguments.get("overwrite", False))
     if not name:
         return {"ok": False, "content": "Skill name is required."}
-    if not description:
-        return {"ok": False, "content": "Skill description is required."}
+    if not description or len(description) > 1024:
+        return {"ok": False, "content": "Skill description must be 1-1024 characters."}
 
     skill_dir = safe_skill_dir(workspace, name)
     if skill_dir.exists() and not overwrite:
@@ -75,28 +77,49 @@ def create_skill(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_skill(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]:
-    name = normalize_name(str(arguments.get("name") or ""))
+    name = str(arguments.get("name") or "").strip()
     if not name:
         return {"ok": False, "content": "Skill name is required."}
     skill_dir = safe_skill_dir(workspace, name)
     issues: list[str] = []
-
     skill_md = skill_dir / "SKILL.md"
-    if not skill_dir.exists():
-        issues.append(f"Missing directory: skills/{name}")
-    if not skill_md.exists():
+    if not skill_md.is_file():
         issues.append(f"Missing file: skills/{name}/SKILL.md")
     else:
-        text = skill_md.read_text(encoding="utf-8")
-        for heading in ["# ", "## Description", "## When to use", "## Allowed tools", "## Instructions"]:
-            if heading not in text:
-                issues.append(f"Missing heading in SKILL.md: {heading.strip()}")
-
+        text = skill_md.read_text(encoding="utf-8-sig")
+        match = re.match(r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)", text, re.M | re.S)
+        if not match:
+            issues.append("SKILL.md must have YAML frontmatter with name and description")
+        else:
+            try:
+                data = yaml.safe_load(match.group(1))
+                if not isinstance(data, dict):
+                    raise ValueError("Frontmatter must be a mapping")
+                declared = data.get("name")
+                description = data.get("description")
+                if not isinstance(declared, str) or not 1 <= len(declared) <= 64 or declared != declared.lower() or not all(c.isalnum() or c == "-" for c in declared) or declared.startswith("-") or declared.endswith("-") or "--" in declared:
+                    issues.append("Invalid name: use lowercase letters/digits and single hyphens, at most 64 characters")
+                if declared != skill_dir.name:
+                    issues.append("Skill name must match its directory")
+                if not isinstance(description, str) or not description.strip() or len(description) > 1024:
+                    issues.append("description must be 1-1024 characters")
+                if "compatibility" in data and (not isinstance(data["compatibility"], str) or not 1 <= len(data["compatibility"]) <= 500):
+                    issues.append("compatibility must be 1-500 characters")
+                for key in ("license", "allowed-tools"):
+                    if key in data and not isinstance(data[key], str):
+                        issues.append(f"{key} must be a string")
+                metadata = data.get("metadata", {})
+                if not isinstance(metadata, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in metadata.items()):
+                    issues.append("metadata must map strings to strings")
+                if set(data) - {"name", "description", "license", "allowed-tools", "metadata", "compatibility"}:
+                    issues.append("Unknown frontmatter fields")
+            except (yaml.YAMLError, ValueError) as exc:
+                issues.append(f"Invalid frontmatter: {exc}")
     manifest = skill_dir / "tools.json"
     if manifest.exists():
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
-            tools = data.get("tools")
+            tools = data.get("tools") if isinstance(data, dict) else None
             if not isinstance(tools, list):
                 issues.append("tools.json must contain a tools list.")
             else:
@@ -104,7 +127,6 @@ def validate_skill(workspace: Path, arguments: dict[str, Any]) -> dict[str, Any]
                     validate_tool_manifest_item(skill_dir, item, issues)
         except json.JSONDecodeError as exc:
             issues.append(f"tools.json is invalid JSON: {exc}")
-
     if issues:
         return {"ok": False, "content": "Validation failed:\n" + "\n".join(f"- {issue}" for issue in issues)}
     return {"ok": True, "content": f"Skill is valid: skills/{name}"}
@@ -132,9 +154,9 @@ def safe_skill_dir(workspace: Path, name: str) -> Path:
 
 def normalize_name(name: str) -> str:
     lowered = name.strip().lower().replace(" ", "-")
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", lowered)
-    normalized = re.sub(r"[-_]{2,}", "-", normalized).strip("-_")
-    return normalized[:63]
+    normalized = re.sub(r"[^a-z0-9-]+", "-", lowered)
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+    return normalized[:64].rstrip("-")
 
 
 def write_file(path: Path, content: str, overwrite: bool) -> None:
@@ -144,7 +166,12 @@ def write_file(path: Path, content: str, overwrite: bool) -> None:
 
 
 def skill_markdown(name: str, description: str) -> str:
-    return f"""# {name}
+    return f"""---
+name: {json.dumps(name, ensure_ascii=False)}
+description: {json.dumps(description, ensure_ascii=False)}
+---
+
+# {name}
 
 ## Description
 {description}
@@ -152,13 +179,10 @@ def skill_markdown(name: str, description: str) -> str:
 ## When to use
 - TODO: このSkillを使うべきユーザー依頼や状況を書く。
 
-## Allowed tools
-- TODO: 使用してよいTool名を書く。Toolがない場合は `none` と書く。
-
 ## Instructions
 - TODO: Agentが従う手順、注意点、判断基準を書く。
 - 必要な詳細資料は `references/` に置き、ここから参照する。
-- 実行ロジックが必要な場合は `scripts/` と `tools.json` を使う。
+- 実行ロジックが必要な場合は `scripts/` を使う。Little Agent専用のTool登録が必要な場合だけ `tools.json` を追加する。
 """
 
 
